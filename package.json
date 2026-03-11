@@ -4,10 +4,11 @@
   "description": "Airtho MCP server — authenticated Microsoft Graph API access for SharePoint/OneDrive",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc",
+    "build": "node --max-old-space-size=8192 node_modules/typescript/bin/tsc",
+    "watch": "node --max-old-space-size=8192 node_modules/typescript/bin/tsc --watch",
     "prestart": "npm run build",
     "start": "func start",
-    "clean": "rm -rf dist"
+    "clean": "npx rimraf dist"
   },
   "engines": {
     "node": ">=18"
