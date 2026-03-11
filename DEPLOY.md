@@ -1,10 +1,10 @@
-# Airtho MCP — Deployment Guide
+# Airtho MCP — Deployment Guide (Azure Functions)
 
 ## Prerequisites
 
-- Azure CLI (`az`) installed and logged in
-- Docker installed (for building the container image)
-- An Azure Container Registry (ACR) or use Docker Hub
+- [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli) installed and logged in
+- [Azure Functions Core Tools v4](https://learn.microsoft.com/en-us/azure/azure-functions/functions-run-local) installed (`npm install -g azure-functions-core-tools@4`)
+- Node.js 18+
 - M365 admin access (for App Registration consent)
 
 ---
@@ -42,62 +42,112 @@ The `id` field in the response is the site ID — it looks like `airtho.sharepoi
 
 ---
 
-## 3. Build and Push the Container
+## 3. Create the Azure Function App
 
 ```bash
-# Build
-docker build -t airtho-mcp:latest .
+# Create a resource group (skip if you have one)
+az group create --name airtho-rg --location australiaeast
 
-# Tag and push to Azure Container Registry
-az acr login --name <your-acr-name>
-docker tag airtho-mcp:latest <your-acr-name>.azurecr.io/airtho-mcp:latest
-docker push <your-acr-name>.azurecr.io/airtho-mcp:latest
+# Create a storage account (required by Functions runtime)
+az storage account create \
+  --name airthomcpstorage \
+  --location australiaeast \
+  --resource-group airtho-rg \
+  --sku Standard_LRS
+
+# Create the Function App (Node.js 20, Linux)
+az functionapp create \
+  --resource-group airtho-rg \
+  --consumption-plan-location australiaeast \
+  --runtime node \
+  --runtime-version 20 \
+  --functions-version 4 \
+  --name airtho-mcp \
+  --storage-account airthomcpstorage \
+  --os-type Linux
 ```
 
 ---
 
-## 4. Deploy to Azure Container Apps
+## 4. Configure App Settings (Secrets)
 
 ```bash
-az containerapp create \
+az functionapp config appsettings set \
   --name airtho-mcp \
-  --resource-group <your-resource-group> \
-  --environment <your-container-app-env> \
-  --image <your-acr-name>.azurecr.io/airtho-mcp:latest \
-  --target-port 3000 \
-  --ingress external \
-  --env-vars \
+  --resource-group airtho-rg \
+  --settings \
     TENANT_ID=<tenant-id> \
     CLIENT_ID=<client-id> \
-    CLIENT_SECRET=secretref:<key-vault-secret-or-direct> \
+    CLIENT_SECRET=<client-secret> \
     DEFAULT_SITE_ID=<site-id>
 ```
 
-For production, store `CLIENT_SECRET` in **Azure Key Vault** and reference it via a Container Apps secret rather than a plain env var.
+For production, store `CLIENT_SECRET` in **Azure Key Vault** and reference it as a Key Vault reference:
+
+```
+@Microsoft.KeyVault(SecretUri=https://<vault-name>.vault.azure.net/secrets/<secret-name>/)
+```
 
 ---
 
-## 5. Register the MCP Endpoint in Claude
+## 5. Build and Deploy
 
-Once deployed, your MCP endpoint URL will be:
+```bash
+npm install
+npm run build
+
+# Deploy via Core Tools (publishes dist/ + package.json to Azure)
+func azure functionapp publish airtho-mcp --node
+```
+
+Your MCP endpoint will be:
 
 ```
-https://<container-app-name>.<region>.azurecontainerapps.io/mcp
+https://airtho-mcp.azurewebsites.net/api/mcp
 ```
 
-Add this URL to Claude's MCP connector settings.
+---
+
+## 6. Register the MCP Endpoint in Claude
+
+Add the URL above to Claude's MCP connector settings.
 
 ---
 
 ## Local Development
 
-```bash
-cp .env.example .env
-# Fill in real values in .env
+### One-time setup
 
+```bash
 npm install
-npm run build
-npm start
+
+# Copy the example settings and fill in your real values
+cp local.settings.json.example local.settings.json
+# Edit local.settings.json — add TENANT_ID, CLIENT_ID, CLIENT_SECRET, DEFAULT_SITE_ID
 ```
 
-Server runs at `http://localhost:3000/mcp`.
+`local.settings.json` is gitignored and never committed.
+
+### Run locally
+
+```bash
+npm start
+# or: func start (after npm run build)
+```
+
+The MCP endpoint will be available at:
+
+```
+http://localhost:7071/api/mcp
+```
+
+### Azurite (local storage emulator)
+
+`AzureWebJobsStorage` in `local.settings.json` is set to `UseDevelopmentStorage=true`, which requires [Azurite](https://learn.microsoft.com/en-us/azure/storage/common/storage-use-azurite):
+
+```bash
+npm install -g azurite
+azurite --silent --location /tmp/azurite &
+```
+
+Alternatively, replace `UseDevelopmentStorage=true` with a real Azure Storage connection string to skip Azurite entirely.
