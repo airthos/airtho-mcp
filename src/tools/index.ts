@@ -22,6 +22,7 @@ function toResponse(result: unknown) {
 
 export function registerTools(server: McpServer): void {
   // ── airtho_list_drives ──────────────────────────────────────────────────────
+  // @ts-expect-error — MCP SDK registerTool generic is too deep for TS to resolve with Zod schemas
   server.registerTool(
     "airtho_list_drives",
     {
@@ -48,10 +49,11 @@ Errors:
       }).strict(),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
-    async (args) => toResponse(await listDrives(args))
+    async (args) => toResponse(await listDrives(args as unknown as { site_id?: string }))
   );
 
   // ── airtho_list_drive_children ──────────────────────────────────────────────
+  // @ts-expect-error — MCP SDK registerTool generic too deep for TS
   server.registerTool(
     "airtho_list_drive_children",
     {
@@ -82,10 +84,11 @@ Errors:
       }).strict(),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
-    async (args) => toResponse(await listDriveChildren(args))
+    async (args) => toResponse(await listDriveChildren(args as unknown as { drive_id: string; item_id: string; limit?: number; offset?: number }))
   );
 
   // ── airtho_get_item_by_path ─────────────────────────────────────────────────
+  // @ts-expect-error — MCP SDK registerTool generic too deep for TS
   server.registerTool(
     "airtho_get_item_by_path",
     {
@@ -112,10 +115,11 @@ Errors:
       }).strict(),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
-    async (args) => toResponse(await getItemByPath(args))
+    async (args) => toResponse(await getItemByPath(args as unknown as { drive_id: string; path: string }))
   );
 
   // ── airtho_search_within_folder ─────────────────────────────────────────────
+  // @ts-expect-error — MCP SDK registerTool generic too deep for TS
   server.registerTool(
     "airtho_search_within_folder",
     {
@@ -145,10 +149,11 @@ Errors:
       }).strict(),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
-    async (args) => toResponse(await searchWithinFolder(args))
+    async (args) => toResponse(await searchWithinFolder(args as unknown as { drive_id: string; item_id: string; query: string; limit?: number }))
   );
 
   // ── airtho_get_file_metadata ────────────────────────────────────────────────
+  // @ts-expect-error — MCP SDK registerTool generic too deep for TS
   server.registerTool(
     "airtho_get_file_metadata",
     {
@@ -174,10 +179,11 @@ Errors:
       }).strict(),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
-    async (args) => toResponse(await getFileMetadata(args))
+    async (args) => toResponse(await getFileMetadata(args as unknown as { drive_id: string; item_id: string }))
   );
 
   // ── airtho_read_file_content ────────────────────────────────────────────────
+  // @ts-expect-error — MCP SDK registerTool generic too deep for TS
   server.registerTool(
     "airtho_read_file_content",
     {
@@ -205,6 +211,6 @@ Errors:
       }).strict(),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
-    async (args) => toResponse(await readFileContent(args))
+    async (args) => toResponse(await readFileContent(args as unknown as { drive_id: string; item_id: string }))
   );
 }

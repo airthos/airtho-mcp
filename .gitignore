@@ -19,11 +19,17 @@ npm-debug.log*
 .DS_Store
 Thumbs.db
 
+# TypeScript incremental build cache
+tsconfig.tsbuildinfo
+
 # Editor
-.vscode/settings.json
+.vscode/
 .idea/
 *.suo
 *.user
+
+# Claude Code
+.claude/
 
 # Azure Functions
 .azurefunctions/

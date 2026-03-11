@@ -1,125 +1,81 @@
 /**
- * Airtho MCP Server — Azure Functions v4 HTTP trigger
+ * Airtho MCP Server — Azure Functions v4 + standalone MCP HTTP server
  *
- * Each POST to /api/mcp is handled statelessly:
- *   1. Parse the MCP JSON-RPC body from the request
- *   2. Create a fresh McpServer + StreamableHTTPServerTransport
- *   3. Capture the JSON response via ResponseCapture
- *   4. Return it as an Azure Functions HttpResponseInit
+ * The MCP server runs on its own port (MCP_PORT, default 3001) using
+ * StreamableHTTPServerTransport directly with a real http.Server.
+ * Each request gets a fresh McpServer + transport (stateless mode).
  *
- * Local dev:  func start  →  http://localhost:7071/api/mcp
- * Deployed:   https://<function-app>.azurewebsites.net/api/mcp
+ * For local dev / Inspector, connect to http://localhost:3001/mcp
  */
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { IncomingMessage, ServerResponse } from "http";
-import { Socket } from "net";
+import * as http from "http";
 import { registerTools } from "./tools/index.js";
 
-// ── Env validation — throws on cold start if misconfigured ────────────────────
+// ── Env validation ────────────────────────────────────────────────────────────
 const REQUIRED_ENV = ["TENANT_ID", "CLIENT_ID", "CLIENT_SECRET"] as const;
 const missing = REQUIRED_ENV.filter((k) => !process.env[k]);
 if (missing.length > 0) {
   throw new Error(`Missing required environment variables: ${missing.join(", ")}`);
 }
 
-// ── MCP server factory ────────────────────────────────────────────────────────
-function createMcpServer(): McpServer {
+// ── Standalone HTTP server for MCP protocol ───────────────────────────────────
+const mcpHttpServer = http.createServer(async (req, res) => {
+  // CORS headers for Inspector / browser clients
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, GET, DELETE, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept");
+
+  if (req.method === "OPTIONS") {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  // Collect request body
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) chunks.push(chunk as Buffer);
+  const bodyStr = Buffer.concat(chunks).toString("utf8");
+  const body = bodyStr ? JSON.parse(bodyStr) : undefined;
+
+  // Fresh server + transport per request (stateless mode)
   const server = new McpServer({ name: "airtho-mcp-server", version: "1.0.0" });
   registerTools(server);
-  return server;
-}
 
-/**
- * Minimal response capture for StreamableHTTPServerTransport with enableJsonResponse:true.
- * The transport only calls setHeader / writeHead / write / end — no streaming, no socket.
- */
-class ResponseCapture {
-  statusCode = 200;
-  readonly headers: Record<string, string | string[]> = {};
-  body = "";
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: undefined,
+    enableJsonResponse: true,
+  });
 
-  setHeader(name: string, value: string | string[]): void {
-    this.headers[name.toLowerCase()] = value;
+  await server.connect(transport);
+
+  try {
+    await transport.handleRequest(req, res, body);
+  } finally {
+    try { await server.close(); } catch { /* ignore */ }
   }
+});
 
-  writeHead(status: number, headers?: Record<string, string>): void {
-    this.statusCode = status;
-    if (headers) {
-      for (const [k, v] of Object.entries(headers)) this.setHeader(k, v);
-    }
-  }
+const MCP_PORT = parseInt(process.env.MCP_PORT ?? "3001", 10);
+mcpHttpServer.listen(MCP_PORT, () => {
+  console.log(`MCP server listening on http://localhost:${MCP_PORT}/mcp`);
+});
 
-  write(chunk: Buffer | string): boolean {
-    this.body += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : chunk;
-    return true;
-  }
-
-  end(chunk?: Buffer | string | (() => void)): this {
-    if (typeof chunk === "function") chunk();
-    else if (chunk != null) {
-      this.body += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : chunk;
-    }
-    return this;
-  }
-}
-
-// ── Azure Function HTTP trigger ───────────────────────────────────────────────
+// ── Azure Function — health check / info endpoint ────────────────────────────
 app.http("mcp", {
   methods: ["POST", "GET", "DELETE"],
   authLevel: "anonymous",
   route: "mcp",
-  handler: async (request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> => {
-    // Stateless mode — only POST is meaningful
-    if (request.method !== "POST") {
-      return {
-        status: 405,
-        jsonBody: { error: "Only POST is supported — stateless MCP over HTTP" },
-      };
-    }
-
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return { status: 400, jsonBody: { error: "Request body must be valid JSON" } };
-    }
-
-    // Build a minimal IncomingMessage so the transport can read method + headers
-    const socket = new Socket();
-    const fakeReq = new IncomingMessage(socket);
-    fakeReq.method = request.method;
-    request.headers.forEach((value, key) => {
-      (fakeReq.headers as Record<string, string>)[key.toLowerCase()] = value;
-    });
-
-    const capture = new ResponseCapture();
-    const server = createMcpServer();
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined, // stateless — no session cookies
-      enableJsonResponse: true,      // full JSON response, no SSE streaming
-    });
-
-    try {
-      await server.connect(transport);
-      await transport.handleRequest(
-        fakeReq,
-        capture as unknown as ServerResponse,
-        body,
-      );
-    } finally {
-      // Best-effort cleanup — errors here don't affect the captured response
-      try { await server.close(); } catch { /* ignore */ }
-    }
-
-    // Flatten multi-value headers for HttpResponseInit
-    const headers: Record<string, string> = {};
-    for (const [k, v] of Object.entries(capture.headers)) {
-      headers[k] = Array.isArray(v) ? v.join(", ") : v;
-    }
-
-    return { status: capture.statusCode, headers, body: capture.body };
+  handler: async (_request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> => {
+    return {
+      status: 200,
+      jsonBody: {
+        status: "ok",
+        mcp_endpoint: `http://localhost:${MCP_PORT}/mcp`,
+        message: "Connect your MCP client directly to the mcp_endpoint URL",
+      },
+    };
   },
 });
