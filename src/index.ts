@@ -1,18 +1,20 @@
 /**
- * Airtho MCP Server — Azure Functions v4 + standalone MCP HTTP server
+ * Airtho MCP Server — Azure Functions v4 with native MCP tool triggers
  *
- * The MCP server runs on its own port (MCP_PORT, default 3001) using
- * StreamableHTTPServerTransport directly with a real http.Server.
- * Each request gets a fresh McpServer + transport (stateless mode).
+ * Each tool is registered via app.mcpTool() and exposed at:
+ *   /runtime/webhooks/mcp  (Streamable HTTP)
  *
- * For local dev / Inspector, connect to http://localhost:3001/mcp
+ * Local dev:  func start  →  http://localhost:7071/runtime/webhooks/mcp
+ * Deployed:   https://<app>.azurewebsites.net/runtime/webhooks/mcp
  */
 
-import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import * as http from "http";
-import { registerTools } from "./tools/index.js";
+import { app, InvocationContext, arg } from "@azure/functions";
+import { listDrives } from "./tools/list-drives.js";
+import { listDriveChildren } from "./tools/list-drive-children.js";
+import { getItemByPath } from "./tools/get-item-by-path.js";
+import { searchWithinFolder } from "./tools/search-within-folder.js";
+import { getFileMetadata } from "./tools/get-file-metadata.js";
+import { readFileContent } from "./tools/read-file-content.js";
 
 // ── Env validation ────────────────────────────────────────────────────────────
 const REQUIRED_ENV = ["TENANT_ID", "CLIENT_ID", "CLIENT_SECRET"] as const;
@@ -21,61 +23,123 @@ if (missing.length > 0) {
   throw new Error(`Missing required environment variables: ${missing.join(", ")}`);
 }
 
-// ── Standalone HTTP server for MCP protocol ───────────────────────────────────
-const mcpHttpServer = http.createServer(async (req, res) => {
-  // CORS headers for Inspector / browser clients
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, GET, DELETE, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept");
+// ── Helper to extract tool args and JSON-stringify the result ─────────────────
+function getArgs(context: InvocationContext): Record<string, unknown> {
+  return (context.triggerMetadata?.mcptoolargs as Record<string, unknown>) ?? {};
+}
 
-  if (req.method === "OPTIONS") {
-    res.writeHead(204);
-    res.end();
-    return;
-  }
+function toResult(result: unknown): string {
+  return JSON.stringify(result, null, 2);
+}
 
-  // Collect request body
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
-  const bodyStr = Buffer.concat(chunks).toString("utf8");
-  const body = bodyStr ? JSON.parse(bodyStr) : undefined;
-
-  // Fresh server + transport per request (stateless mode)
-  const server = new McpServer({ name: "airtho-mcp-server", version: "1.0.0" });
-  registerTools(server);
-
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: undefined,
-    enableJsonResponse: true,
-  });
-
-  await server.connect(transport);
-
-  try {
-    await transport.handleRequest(req, res, body);
-  } finally {
-    try { await server.close(); } catch { /* ignore */ }
-  }
+// ── airtho_list_drives ──────────────────────────────────────────────────────
+app.mcpTool("airthoListDrives", {
+  toolName: "airtho_list_drives",
+  description: "List available document library drives on an Airtho SharePoint site. Use once to discover drive IDs for subsequent calls.",
+  toolProperties: {
+    site_id: arg.string().describe("SharePoint site ID. Omit to use the server default.").optional(),
+  },
+  handler: async (_toolArgs: unknown, context: InvocationContext): Promise<string> => {
+    const args = getArgs(context);
+    const result = await listDrives({ site_id: args.site_id as string | undefined });
+    return toResult(result);
+  },
 });
 
-const MCP_PORT = parseInt(process.env.MCP_PORT ?? "3001", 10);
-mcpHttpServer.listen(MCP_PORT, () => {
-  console.log(`MCP server listening on http://localhost:${MCP_PORT}/mcp`);
+// ── airtho_list_drive_children ──────────────────────────────────────────────
+app.mcpTool("airthoListDriveChildren", {
+  toolName: "airtho_list_drive_children",
+  description: "List the immediate children (files and folders) of a folder in a SharePoint drive.",
+  toolProperties: {
+    drive_id: arg.string().describe("The drive ID"),
+    item_id: arg.string().describe("Folder item ID, or 'root' for the drive root"),
+    limit: arg.number().describe("Max items to return, 1-200 (default: 50)").optional(),
+    offset: arg.number().describe("Items to skip for pagination (default: 0)").optional(),
+  },
+  handler: async (_toolArgs: unknown, context: InvocationContext): Promise<string> => {
+    const args = getArgs(context);
+    const result = await listDriveChildren({
+      drive_id: args.drive_id as string,
+      item_id: args.item_id as string,
+      limit: args.limit as number | undefined,
+      offset: args.offset as number | undefined,
+    });
+    return toResult(result);
+  },
 });
 
-// ── Azure Function — health check / info endpoint ────────────────────────────
-app.http("mcp", {
-  methods: ["POST", "GET", "DELETE"],
-  authLevel: "anonymous",
-  route: "mcp",
-  handler: async (_request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> => {
-    return {
-      status: 200,
-      jsonBody: {
-        status: "ok",
-        mcp_endpoint: `http://localhost:${MCP_PORT}/mcp`,
-        message: "Connect your MCP client directly to the mcp_endpoint URL",
-      },
-    };
+// ── airtho_get_item_by_path ─────────────────────────────────────────────────
+app.mcpTool("airthoGetItemByPath", {
+  toolName: "airtho_get_item_by_path",
+  description: "Resolve a path string to a Graph item ID and metadata. Use to navigate to known folder paths without iterating children.",
+  toolProperties: {
+    drive_id: arg.string().describe("The drive ID"),
+    path: arg.string().describe("Path relative to drive root, e.g. 'Jobs/2024-001 Acme Corp'"),
+  },
+  handler: async (_toolArgs: unknown, context: InvocationContext): Promise<string> => {
+    const args = getArgs(context);
+    const result = await getItemByPath({
+      drive_id: args.drive_id as string,
+      path: args.path as string,
+    });
+    return toResult(result);
+  },
+});
+
+// ── airtho_search_within_folder ─────────────────────────────────────────────
+app.mcpTool("airthoSearchWithinFolder", {
+  toolName: "airtho_search_within_folder",
+  description: "Search for files by keyword within a specific folder subtree. Scoped to the provided folder — not tenant-wide.",
+  toolProperties: {
+    drive_id: arg.string().describe("The drive ID"),
+    item_id: arg.string().describe("Folder item ID to scope the search to"),
+    query: arg.string().describe("Search keyword(s)"),
+    limit: arg.number().describe("Max results to return, 1-200 (default: 50)").optional(),
+  },
+  handler: async (_toolArgs: unknown, context: InvocationContext): Promise<string> => {
+    const args = getArgs(context);
+    const result = await searchWithinFolder({
+      drive_id: args.drive_id as string,
+      item_id: args.item_id as string,
+      query: args.query as string,
+      limit: args.limit as number | undefined,
+    });
+    return toResult(result);
+  },
+});
+
+// ── airtho_get_file_metadata ────────────────────────────────────────────────
+app.mcpTool("airthoGetFileMetadata", {
+  toolName: "airtho_get_file_metadata",
+  description: "Get metadata for a specific file: name, size, dates, MIME type, and a pre-authenticated download URL.",
+  toolProperties: {
+    drive_id: arg.string().describe("The drive ID"),
+    item_id: arg.string().describe("The file's Graph item ID"),
+  },
+  handler: async (_toolArgs: unknown, context: InvocationContext): Promise<string> => {
+    const args = getArgs(context);
+    const result = await getFileMetadata({
+      drive_id: args.drive_id as string,
+      item_id: args.item_id as string,
+    });
+    return toResult(result);
+  },
+});
+
+// ── airtho_read_file_content ────────────────────────────────────────────────
+app.mcpTool("airthoReadFileContent", {
+  toolName: "airtho_read_file_content",
+  description: "Fetch the text content of a file. Supported: plain text, CSV, JSON, XML, HTML, Markdown, JS, Word (.docx). Truncated at ~50,000 chars.",
+  toolProperties: {
+    drive_id: arg.string().describe("The drive ID"),
+    item_id: arg.string().describe("The file's Graph item ID"),
+  },
+  handler: async (_toolArgs: unknown, context: InvocationContext): Promise<string> => {
+    const args = getArgs(context);
+    const result = await readFileContent({
+      drive_id: args.drive_id as string,
+      item_id: args.item_id as string,
+    });
+    return toResult(result);
   },
 });
