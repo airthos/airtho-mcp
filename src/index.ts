@@ -1,20 +1,19 @@
 /**
  * Airtho MCP Server — Azure Functions v4 with native MCP tool triggers
  *
- * Each tool is registered via app.mcpTool() and exposed at:
- *   /runtime/webhooks/mcp  (Streamable HTTP)
+ * Three high-level tools for navigating Airtho's SharePoint document libraries.
+ * All tools accept human-readable drive names (e.g., "Jobs") — no opaque IDs required.
+ *
+ * Tools: airtho_browse, airtho_search, airtho_read
  *
  * Local dev:  func start  →  http://localhost:7071/runtime/webhooks/mcp
  * Deployed:   https://<app>.azurewebsites.net/runtime/webhooks/mcp
  */
 
 import { app, InvocationContext, arg } from "@azure/functions";
-import { listDrives } from "./tools/list-drives.js";
-import { listDriveChildren } from "./tools/list-drive-children.js";
-import { getItemByPath } from "./tools/get-item-by-path.js";
-import { searchWithinFolder } from "./tools/search-within-folder.js";
-import { getFileMetadata } from "./tools/get-file-metadata.js";
-import { readFileContent } from "./tools/read-file-content.js";
+import { browse } from "./tools/browse.js";
+import { search } from "./tools/search.js";
+import { read } from "./tools/read.js";
 
 // ── Env validation ────────────────────────────────────────────────────────────
 const REQUIRED_ENV = ["TENANT_ID", "CLIENT_ID", "CLIENT_SECRET"] as const;
@@ -32,35 +31,28 @@ function toResult(result: unknown): string {
   return JSON.stringify(result, null, 2);
 }
 
-// ── airtho_list_drives ──────────────────────────────────────────────────────
-app.mcpTool("airthoListDrives", {
-  toolName: "airtho_list_drives",
-  description: "List available document library drives on an Airtho SharePoint site. Use once to discover drive IDs for subsequent calls.",
+// ── airtho_browse ─────────────────────────────────────────────────────────────
+app.mcpTool("airthoBrowse", {
+  toolName: "airtho_browse",
+  description:
+    "Browse Airtho's SharePoint document libraries. " +
+    "Call with no arguments to list available drives. " +
+    "Call with drive_name to list its root contents. " +
+    "Call with drive_name + path to list a subfolder or get file metadata. " +
+    "Returns folder contents (name, item_id, type, size) or file metadata with download URL.",
   toolProperties: {
-    site_id: arg.string().describe("SharePoint site ID. Omit to use the server default.").optional(),
-  },
-  handler: async (_toolArgs: unknown, context: InvocationContext): Promise<string> => {
-    const args = getArgs(context);
-    const result = await listDrives({ site_id: args.site_id as string | undefined });
-    return toResult(result);
-  },
-});
-
-// ── airtho_list_drive_children ──────────────────────────────────────────────
-app.mcpTool("airthoListDriveChildren", {
-  toolName: "airtho_list_drive_children",
-  description: "List the immediate children (files and folders) of a folder in a SharePoint drive.",
-  toolProperties: {
-    drive_id: arg.string().describe("The drive ID"),
-    item_id: arg.string().describe("Folder item ID, or 'root' for the drive root"),
+    drive_name: arg.string().describe("Drive name, e.g. 'Jobs', 'Quotes', 'Vendors'. Omit to list all available drives.").optional(),
+    path: arg.string().describe("Path within the drive, e.g. '051 Factorial' or '051 Factorial/Submittals'. Omit to list drive root.").optional(),
+    item_id: arg.string().describe("Item ID from a previous browse/search result. Use instead of path for follow-up navigation.").optional(),
     limit: arg.number().describe("Max items to return, 1-200 (default: 50)").optional(),
     offset: arg.number().describe("Items to skip for pagination (default: 0)").optional(),
   },
   handler: async (_toolArgs: unknown, context: InvocationContext): Promise<string> => {
     const args = getArgs(context);
-    const result = await listDriveChildren({
-      drive_id: args.drive_id as string,
-      item_id: args.item_id as string,
+    const result = await browse({
+      drive_name: args.drive_name as string | undefined,
+      path: args.path as string | undefined,
+      item_id: args.item_id as string | undefined,
       limit: args.limit as number | undefined,
       offset: args.offset as number | undefined,
     });
@@ -68,77 +60,51 @@ app.mcpTool("airthoListDriveChildren", {
   },
 });
 
-// ── airtho_get_item_by_path ─────────────────────────────────────────────────
-app.mcpTool("airthoGetItemByPath", {
-  toolName: "airtho_get_item_by_path",
-  description: "Resolve a path string to a Graph item ID and metadata. Use to navigate to known folder paths without iterating children.",
+// ── airtho_search ─────────────────────────────────────────────────────────────
+app.mcpTool("airthoSearch", {
+  toolName: "airtho_search",
+  description:
+    "Search for files by keyword within Airtho's SharePoint. " +
+    "Searches file names and content. Defaults to the Jobs drive. " +
+    "Optionally scope to a specific folder path. " +
+    "Returns matching files with item_id, path, size, and modified date.",
   toolProperties: {
-    drive_id: arg.string().describe("The drive ID"),
-    path: arg.string().describe("Path relative to drive root, e.g. 'Jobs/2024-001 Acme Corp'"),
-  },
-  handler: async (_toolArgs: unknown, context: InvocationContext): Promise<string> => {
-    const args = getArgs(context);
-    const result = await getItemByPath({
-      drive_id: args.drive_id as string,
-      path: args.path as string,
-    });
-    return toResult(result);
-  },
-});
-
-// ── airtho_search_within_folder ─────────────────────────────────────────────
-app.mcpTool("airthoSearchWithinFolder", {
-  toolName: "airtho_search_within_folder",
-  description: "Search for files by keyword within a specific folder subtree. Scoped to the provided folder — not tenant-wide.",
-  toolProperties: {
-    drive_id: arg.string().describe("The drive ID"),
-    item_id: arg.string().describe("Folder item ID to scope the search to"),
-    query: arg.string().describe("Search keyword(s)"),
+    query: arg.string().describe("Search keywords, e.g. 'Factorial' or 'temperature review'"),
+    drive_name: arg.string().describe("Drive to search in (default: 'Jobs')").optional(),
+    folder_path: arg.string().describe("Scope search to a subfolder path, e.g. '051 Factorial'. Omit to search entire drive.").optional(),
     limit: arg.number().describe("Max results to return, 1-200 (default: 50)").optional(),
   },
   handler: async (_toolArgs: unknown, context: InvocationContext): Promise<string> => {
     const args = getArgs(context);
-    const result = await searchWithinFolder({
-      drive_id: args.drive_id as string,
-      item_id: args.item_id as string,
+    const result = await search({
       query: args.query as string,
+      drive_name: args.drive_name as string | undefined,
+      folder_path: args.folder_path as string | undefined,
       limit: args.limit as number | undefined,
     });
     return toResult(result);
   },
 });
 
-// ── airtho_get_file_metadata ────────────────────────────────────────────────
-app.mcpTool("airthoGetFileMetadata", {
-  toolName: "airtho_get_file_metadata",
-  description: "Get metadata for a specific file: name, size, dates, MIME type, and a pre-authenticated download URL.",
+// ── airtho_read ───────────────────────────────────────────────────────────────
+app.mcpTool("airthoRead", {
+  toolName: "airtho_read",
+  description:
+    "Read the text content of a file from Airtho's SharePoint. " +
+    "Supports: plain text, CSV, JSON, XML, HTML, Markdown, JS/TS, Word (.docx). " +
+    "For unsupported formats (PDF, Excel, images), returns a download URL to share with the user. " +
+    "Provide either a file path or an item_id from a previous browse/search result.",
   toolProperties: {
-    drive_id: arg.string().describe("The drive ID"),
-    item_id: arg.string().describe("The file's Graph item ID"),
+    drive_name: arg.string().describe("Drive name, e.g. 'Jobs', 'Quotes'"),
+    path: arg.string().describe("File path within the drive, e.g. '051 Factorial/some-doc.docx'").optional(),
+    item_id: arg.string().describe("File item_id from a previous browse/search result. Use instead of path.").optional(),
   },
   handler: async (_toolArgs: unknown, context: InvocationContext): Promise<string> => {
     const args = getArgs(context);
-    const result = await getFileMetadata({
-      drive_id: args.drive_id as string,
-      item_id: args.item_id as string,
-    });
-    return toResult(result);
-  },
-});
-
-// ── airtho_read_file_content ────────────────────────────────────────────────
-app.mcpTool("airthoReadFileContent", {
-  toolName: "airtho_read_file_content",
-  description: "Fetch the text content of a file. Supported: plain text, CSV, JSON, XML, HTML, Markdown, JS, Word (.docx). Truncated at ~50,000 chars.",
-  toolProperties: {
-    drive_id: arg.string().describe("The drive ID"),
-    item_id: arg.string().describe("The file's Graph item ID"),
-  },
-  handler: async (_toolArgs: unknown, context: InvocationContext): Promise<string> => {
-    const args = getArgs(context);
-    const result = await readFileContent({
-      drive_id: args.drive_id as string,
-      item_id: args.item_id as string,
+    const result = await read({
+      drive_name: args.drive_name as string,
+      path: args.path as string | undefined,
+      item_id: args.item_id as string | undefined,
     });
     return toResult(result);
   },
