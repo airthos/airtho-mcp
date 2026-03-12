@@ -1,13 +1,12 @@
 # Airtho MCP Server — Agent Reference
 
 This document is a complete technical reference for Claude agents working with this codebase.
-It is not a user guide. It is a machine-readable spec for building skills, writing tests, debugging, and extending the server.
 
 ---
 
 ## What This Server Is
 
-An MCP (Model Context Protocol) server that exposes Airtho's Microsoft SharePoint/OneDrive document libraries to Claude via the Microsoft Graph API. It uses the native Azure Functions MCP binding extension (`app.mcpTool()`) — the Functions runtime handles the MCP protocol natively. All tools are read-only.
+An MCP (Model Context Protocol) server that exposes Airtho's Microsoft SharePoint/OneDrive document libraries to Claude via the Microsoft Graph API. It uses the native Azure Functions MCP binding (`app.mcpTool()`) — the Functions runtime handles MCP protocol natively. All tools are read-only.
 
 ---
 
@@ -18,7 +17,7 @@ An MCP (Model Context Protocol) server that exposes Airtho's Microsoft SharePoin
 - **MCP config**: `host.json` → `extensions.mcp` section (serverName, serverVersion, instructions)
 - **Local dev URL**: `http://localhost:7071/runtime/webhooks/mcp`
 - **Deployed URL**: `https://<app>.azurewebsites.net/runtime/webhooks/mcp`
-- **Auth**: System key `mcp_extension` required via `x-functions-key` header (or set `webhookAuthorizationLevel: "Anonymous"` in host.json)
+- **Auth**: System key `mcp_extension` required via `x-functions-key` header
 - **MCP is text-only**. Files are returned as extracted strings, never binary.
 
 ---
@@ -28,26 +27,19 @@ An MCP (Model Context Protocol) server that exposes Airtho's Microsoft SharePoin
 ```
 airtho-mcp/
 ├── src/
-│   ├── index.ts              # app.mcpTool() registrations for all 6 tools
+│   ├── index.ts              # app.mcpTool() registrations for all 3 tools
 │   ├── constants.ts          # CHARACTER_LIMIT (50000), GRAPH_BASE_URL
-│   ├── types.ts              # All TypeScript interfaces (see below)
+│   ├── types.ts              # McpError, GraphDrive, GraphItem interfaces
 │   ├── graph/
 │   │   └── client.ts         # Lazy Graph client singleton + getBearerToken()
 │   └── tools/
-│       ├── list-drives.ts
-│       ├── list-drive-children.ts
-│       ├── get-item-by-path.ts
-│       ├── search-within-folder.ts
-│       ├── get-file-metadata.ts
-│       └── read-file-content.ts
+│       ├── resolve-drive.ts  # Drive name→ID resolution + drive list cache
+│       ├── browse.ts
+│       ├── search.ts
+│       └── read.ts
 ├── host.json                 # Azure Functions host config + extensions.mcp server settings
 ├── local.settings.json.example  # Local dev env vars template (never committed)
-├── local.settings.json       # NEVER COMMIT — contains real credentials locally
-├── .env.example              # Env var template (old Container Apps format, kept for reference)
-├── .env                      # NEVER COMMIT — real credentials
-├── package.json              # build=node --max-old-space-size=8192 tsc, start=func start
-├── tsconfig.json             # module: commonjs, moduleResolution: node, outDir: dist
-├── DEPLOY.md                 # Human-readable Azure deployment instructions
+├── DEPLOY.md                 # Azure deployment instructions
 └── AGENT_REFERENCE.md        # This file
 ```
 
@@ -57,27 +49,20 @@ airtho-mcp/
 
 ### Prerequisites
 - Node.js >= 18
-- Azure Functions Core Tools v4 installed globally: `npm install -g azure-functions-core-tools@4`
+- Azure Functions Core Tools v4: `npm install -g azure-functions-core-tools@4`
 - `npm install` in the project root
 
 ### Local development
 ```bash
-# Copy and fill credentials
 cp local.settings.json.example local.settings.json
-# edit local.settings.json with real TENANT_ID, CLIENT_ID, CLIENT_SECRET, DEFAULT_SITE_ID
+# fill in TENANT_ID, CLIENT_ID, CLIENT_SECRET, DEFAULT_SITE_ID
 
 npm start
 # → runs: tsc (via prestart) then func start
 # → MCP endpoint: http://localhost:7071/runtime/webhooks/mcp
 ```
 
-**Build note**: The `@microsoft/microsoft-graph-client` package ships massive type definitions. Build requires 8GB heap (`node --max-old-space-size=8192`). The `prebuild` script deletes `tsconfig.tsbuildinfo` to prevent stale incremental cache from skipping emit.
-
-### Build only
-```bash
-npm run build   # outputs to dist/
-npm run clean   # rm -rf dist
-```
+**Build note**: The `@microsoft/microsoft-graph-client` package ships massive type definitions. Build requires 8GB heap (`node --max-old-space-size=8192`). The `prebuild` script deletes `tsconfig.tsbuildinfo` to prevent stale incremental cache.
 
 ### TypeScript config
 - `"module": "commonjs"`, `"moduleResolution": "node"` — NOT ESM
@@ -89,263 +74,208 @@ npm run clean   # rm -rf dist
 
 ## Environment Variables
 
-All are read from `process.env` at runtime.
-
 | Variable | Required | Description |
 |---|---|---|
 | `TENANT_ID` | YES | Azure AD tenant ID (GUID) |
 | `CLIENT_ID` | YES | App registration client ID (GUID) |
 | `CLIENT_SECRET` | YES | App registration client secret |
-| `DEFAULT_SITE_ID` | NO | Fallback SharePoint site ID for tools that accept `site_id`. Format: `airtho.sharepoint.com,<guid>,<guid>` (compound with commas, NOT a URL slug) |
+| `DEFAULT_SITE_ID` | YES | SharePoint site ID. Format: `airtho.sharepoint.com,<guid>,<guid>` |
 
-**Startup validation**: If `TENANT_ID`, `CLIENT_ID`, or `CLIENT_SECRET` are missing, the module throws on cold start and the function will not start.
+**Startup validation**: If `TENANT_ID`, `CLIENT_ID`, or `CLIENT_SECRET` are missing, the module throws on cold start.
 
-**Local dev**: vars go in `local.settings.json` under `Values`. Azure reads them from Application Settings.
-
-**Site ID format**: The `DEFAULT_SITE_ID` (and any `site_id` arg) must be the full compound Graph site ID. Discover it:
+**Site ID discovery**:
 ```
 GET https://graph.microsoft.com/v1.0/sites/airtho.sharepoint.com:/sites/Airtho
 ```
-The `id` field in the response is the value to use (e.g. `airtho.sharepoint.com,abc123,def456`).
+The `id` field is the compound site ID (e.g. `airtho.sharepoint.com,abc123,def456`).
 
 ---
 
 ## Authentication
 
 ### MCP endpoint auth (Claude → Azure Function)
-The MCP extension uses a system key `mcp_extension`. Clients must include it via `x-functions-key` header or `?code=` query param. Retrieve with:
+The MCP extension uses a system key `mcp_extension`. Retrieve with:
 ```bash
 az functionapp keys list --resource-group <RG> --name <APP> --query systemKeys.mcp_extension --output tsv
 ```
 
 ### Graph API auth (Azure Function → SharePoint)
-Uses OAuth 2.0 client credentials flow (app-only, no user sign-in).
-
-**Azure AD App Registration must have these application permissions (not delegated), with admin consent granted**:
+OAuth 2.0 client credentials flow (app-only). Required **application permissions** with admin consent:
 - `Sites.Read.All`
 - `Files.Read.All`
 
 **Graph client**: `src/graph/client.ts` exports:
-- `getGraphClient()` — returns a lazy-init `@microsoft/microsoft-graph-client` `Client` instance
-- `getBearerToken()` — returns a raw bearer token string for direct `fetch()` calls
+- `getGraphClient()` — lazy-init `@microsoft/microsoft-graph-client` `Client` instance
+- `getBearerToken()` — raw bearer token string for direct `fetch()` calls
 
-Both are singletons per Function worker instance (cold-started once, reused across warm invocations).
+Both are singletons per Function worker instance.
+
+---
+
+## Drive Resolution (`src/tools/resolve-drive.ts`)
+
+Tools accept human-readable drive names (e.g. `"Jobs"`) instead of opaque Graph drive IDs. `resolve-drive.ts` handles the translation:
+
+- `resolveDrive(driveName)` — case-insensitive match against live drives for the configured site; returns `{ driveId, driveName }` or `McpError`
+- `listAllDrives()` — returns all drives as `{ name, description }[]`
+- Drive list is **cached per cold-start** (`_driveCache`). Drives rarely change.
 
 ---
 
 ## MCP Tools — Complete Reference
 
-All tools are registered via `app.mcpTool()` in `src/index.ts`. All are read-only. Tool handlers return JSON-stringified results. Errors are returned as `McpError` objects (`{ error, message }`).
+All tools are registered in `src/index.ts` via `app.mcpTool()`. Tool args are extracted via:
+```typescript
+context.triggerMetadata?.mcptoolargs as Record<string, unknown>
+```
+(Not from the `_toolArgs` parameter — that is unused.)
 
-### Tool naming
-All tools have the `airtho_` prefix to avoid conflicts with the M365 MCP connector that may be running alongside.
+All tools use the `airtho_` prefix. Registration names are camelCase (`airthoBrowse`), tool names snake_case (`airtho_browse`).
 
 ### Error response shape
-When a tool call fails, `isError: true` is set on the MCP response and the content is:
 ```json
 { "error": "<error_code>", "message": "<human readable detail>" }
 ```
 
 ### Success response shape
-All successful responses are JSON stringified (2-space indented) and returned as a string from the handler.
+All handlers return `JSON.stringify(result, null, 2)`.
 
 ---
 
-### `airtho_list_drives`
+### `airtho_browse`
 
-Lists document library drives on a SharePoint site.
-
-**Input**:
-```typescript
-{ site_id?: string }
-```
-- `site_id`: optional. Omit to use `DEFAULT_SITE_ID`.
-
-**Output** (array):
-```typescript
-DriveInfo[]
-// Each: { drive_id: string, name: string, drive_type: string }
-```
-
-**Use when**: discovering which drive to target. Run once, record the `drive_id`.
-
-**Errors**:
-- `site_not_found` — invalid site ID or missing consent
-- `missing_site_id` — no site_id arg and DEFAULT_SITE_ID not set
-
----
-
-### `airtho_list_drive_children`
-
-Lists immediate children of a folder.
+Navigate drives and folders by name. No opaque IDs needed.
 
 **Input**:
 ```typescript
-{ drive_id: string, item_id: string, limit?: number, offset?: number }
+{
+  drive_name?: string   // e.g. "Jobs". Omit to list all available drives.
+  path?: string         // e.g. "051 Factorial/Submittals". Omit for drive root.
+  item_id?: string      // Item ID from a prior browse/search result (faster than path).
+  limit?: number        // 1–200, default 50
+  offset?: number       // default 0
+}
 ```
-- `item_id`: Use `"root"` for the drive root. Otherwise use a Graph item ID.
-- `limit`: 1–200, default 50
-- `offset`: default 0
 
-**Output**:
+**Output** (one of):
 ```typescript
-{ items: DriveItem[], has_more: boolean, total_returned: number }
-// DriveItem: { name, id, type: "file"|"folder", modified: string|null, size: number|null }
+// No drive_name → drive list
+{ drives: { name: string; description: string }[] }
+
+// path points to a file → file metadata
+{ drive_name, path, file: { name, item_id, type: "file", modified, size, mime_type, download_url } }
+
+// path/item_id points to a folder → folder contents
+{ drive_name, path, items: BrowseItem[], has_more, total_returned }
+// BrowseItem: { name, item_id, type: "file"|"folder", modified, size }
 ```
 
 **Pagination**: Check `has_more`. If true, call again with `offset += limit`.
 
-**Errors**:
-- `item_not_found` — folder ID not found
-- `drive_not_found` — drive ID not accessible
+**Errors**: `drive_not_found`, `not_found`, `missing_site_id`, `graph_error`
 
 ---
 
-### `airtho_get_item_by_path`
+### `airtho_search`
 
-Resolves a path string to a Graph item ID.
-
-**Input**:
-```typescript
-{ drive_id: string, path: string }
-```
-- `path`: relative to drive root, e.g. `"Jobs/2025-042 Northgate"`. Do not include a leading `/`.
-
-**Output**:
-```typescript
-ItemMetadata
-// { name, id, type: "file"|"folder", modified, size, parent_id }
-```
-
-**Use when**: you know the path and want to skip iterating children to find the item ID.
-
-**Errors**:
-- `item_not_found` — no item at path
-- `drive_not_found` — drive not accessible
-
----
-
-### `airtho_search_within_folder`
-
-Full-text + filename search scoped to a folder subtree.
+Full-text + filename search within a drive.
 
 **Input**:
 ```typescript
-{ drive_id: string, item_id: string, query: string, limit?: number }
-```
-- `item_id`: Scope folder. Use root job folder to search all jobs.
-- `query`: Search keywords. Matches file names and indexed content.
-- `limit`: 1–200, default 50
-
-**Output**:
-```typescript
-{ results: SearchResult[], has_more: boolean, total_returned: number }
-// SearchResult: { name, id, path: string|null, modified, size }
-```
-
-**Note**: Search is not idempotent (results can change as files are indexed). `has_more` indicates the result set was truncated.
-
-**Errors**:
-- `item_not_found` — folder item ID not found
-
----
-
-### `airtho_get_file_metadata`
-
-Gets metadata for a specific file including a pre-auth download URL.
-
-**Input**:
-```typescript
-{ drive_id: string, item_id: string }
+{
+  query: string         // Search keywords
+  drive_name?: string   // default "Jobs"
+  folder_path?: string  // Scope to subfolder, e.g. "051 Factorial". Omit to search entire drive.
+  limit?: number        // 1–200, default 50
+}
 ```
 
 **Output**:
 ```typescript
-FileMetadata
-// { name, id, size: number|null, modified, created, download_url: string|null, mime_type: string|null }
+{
+  drive_name: string
+  query: string
+  scoped_to: string      // "/" or the folder_path
+  results: SearchHit[]
+  has_more: boolean
+  total_returned: number
+}
+// SearchHit: { name, item_id, type: "file"|"folder", path: string|null, modified, size }
 ```
 
-- `download_url`: short-lived pre-authenticated URL (~1 hour). Can be given to the human user to download the file directly. Claude cannot use it to download binary files — only the human can.
+**Note**: `has_more: true` when results hit the limit. Search index may lag recent file changes by minutes.
 
-**Errors**:
-- `item_not_found`
+**Errors**: `drive_not_found`, `not_found`, `graph_error`
 
 ---
 
-### `airtho_read_file_content`
+### `airtho_read`
 
-Fetches the text content of a file.
+Read the text content of a file. For unsupported binary formats, returns a download URL to share with the user.
 
 **Input**:
 ```typescript
-{ drive_id: string, item_id: string }
+{
+  drive_name: string    // e.g. "Jobs"
+  path?: string         // e.g. "051 Factorial/scope.docx"
+  item_id?: string      // From a prior browse/search result (use instead of path)
+}
 ```
+Either `path` or `item_id` is required.
 
-**Output**:
+**Output** (one of):
 ```typescript
-FileContent
-// { content: string, mime_type: string, truncated: boolean }
+// Supported text format
+{ drive_name, file_name, content: string, mime_type, truncated: boolean }
+
+// Unsupported binary format (PDF, Excel, images, etc.)
+{ drive_name, file_name, error: "unsupported_format", message, mime_type, download_url: string|null }
 ```
 
 **Supported formats** (returns plain text):
 - `text/plain`, `text/csv`, `text/html`, `text/markdown`, `text/xml`, `text/javascript`
 - `application/json`, `application/xml`, `application/javascript`
-- `application/vnd.openxmlformats-officedocument.wordprocessingml.document` (.docx) — Graph converts to plain text via `?format=text`
+- `.docx` — extracted directly from the ZIP using Node built-ins (no external library)
 
-**Unsupported** (returns `content_unavailable`):
-- `.pdf`, `.xlsx`, `.dwg`, `.pptx`, `.png`, `.jpg`, and any other binary format
+**Unsupported**: `.pdf`, `.xlsx`, `.pptx`, `.dwg`, `.png`, `.jpg`, and all other binary formats
 
-**Truncation**: Content is cut at 50,000 characters. If `truncated: true`, call `airtho_get_file_metadata` to get `download_url` and surface it to the user.
+**Truncation**: Content cut at 50,000 chars. If `truncated: true`, surface `download_url` (from `airtho_browse`) to the user.
 
-**Errors**:
-- `content_unavailable` — unsupported MIME type or not a file
-- `item_not_found`
+**Errors**: `not_a_file`, `not_found`, `invalid_input`, `content_unavailable`, `graph_error`
 
 ---
 
 ## TypeScript Types Reference
 
-Defined in `src/types.ts`:
+Defined in `src/types.ts` (shared internal types only):
 
 ```typescript
-// Tool output types
-DriveInfo       { drive_id, name, drive_type }
-DriveItem       { name, id, type, modified, size }
-ItemMetadata    { name, id, type, modified, size, parent_id }
-SearchResult    { name, id, path, modified, size }
-FileMetadata    { name, id, size, modified, created, download_url, mime_type }
-FileContent     { content, mime_type, truncated }
-McpError        { error, message }
-
-// Graph API raw response shapes (used internally)
-GraphDrive      { id, name, driveType }
-GraphItem       { id, name, folder?, file?, lastModifiedDateTime?, createdDateTime?,
-                  size?, parentReference?, "@microsoft.graph.downloadUrl"? }
+McpError     { error: string; message: string }
+GraphDrive   { id, name, driveType }
+GraphItem    { id, name, folder?, file?, lastModifiedDateTime?, createdDateTime?,
+               size?, parentReference?, "@microsoft.graph.downloadUrl"? }
 ```
+
+Tool-specific output types are defined inline in each tool file.
 
 ---
 
-## Typical Usage Pattern for Skills
-
-A skill that needs to find and read a file in a known job folder:
+## Typical Usage Pattern
 
 ```
-1. airtho_list_drives({ })
-   → record drive_id (likely "Documents" or similar)
+1. airtho_browse({ })
+   → list available drives, pick drive_name
 
-2. airtho_get_item_by_path({ drive_id, path: "Jobs/2025-042 Northgate" })
-   → record folder item_id
+2. airtho_browse({ drive_name: "Jobs", path: "051 Factorial" })
+   → list folder contents, find target file, record item_id
 
-3. airtho_list_drive_children({ drive_id, item_id: <folder_id> })
-   → find the target file, record file item_id
-
-4. airtho_read_file_content({ drive_id, item_id: <file_id> })
-   → read the text content
+3. airtho_read({ drive_name: "Jobs", item_id: <file_id> })
+   → read text content
 ```
 
-Or if the file name is unknown:
+Or when file name is unknown:
 ```
-3b. airtho_search_within_folder({ drive_id, item_id: <folder_id>, query: "quote" })
+2b. airtho_search({ query: "temperature review", drive_name: "Jobs", folder_path: "051 Factorial" })
     → find file by keyword, record item_id
 ```
 
@@ -353,26 +283,25 @@ Or if the file name is unknown:
 
 ## Adding a New Tool
 
-1. Create `src/tools/<tool-name>.ts` — export an async function, return typed result or `McpError`
+1. Create `src/tools/<tool-name>.ts` — export an async function returning typed result or `McpError`
 2. Import it in `src/index.ts`
 3. Register with `app.mcpTool("airthoToolName", { toolName: "airtho_tool_name", description: "...", toolProperties: { ... }, handler: async (_toolArgs, context) => { ... } })`
-4. Use `arg.string().describe("...")` for required props, add `.optional()` for optional ones
+4. Use `arg.string().describe("...")` for required props, `.optional()` for optional ones
 5. Extract args via `context.triggerMetadata?.mcptoolargs`
 6. Return `JSON.stringify(result, null, 2)` from the handler
-7. Run `npm run build` to verify
 
 Conventions:
 - Always return `McpError` from catch blocks, never throw
-- Tool names use `airtho_` prefix
-- Function registration names use camelCase (`airthoToolName`), tool names use snake_case (`airtho_tool_name`)
+- Tool names: `airtho_` prefix, snake_case
+- Registration names: camelCase (`airthoToolName`)
 
 ---
 
 ## Deploying
 
-1. Create Azure Function App (Node.js 22, Linux)
+1. Create Azure Function App (Node.js 22, Linux, consumption plan)
 2. Set Application Settings: `TENANT_ID`, `CLIENT_ID`, `CLIENT_SECRET`, `DEFAULT_SITE_ID`
-3. Deploy: `func azure functionapp publish <app-name>`
+3. Deploy: `func azure functionapp publish <app-name> --node`
 4. Get system key: `az functionapp keys list --resource-group <RG> --name <APP> --query systemKeys.mcp_extension --output tsv`
 5. MCP endpoint: `https://<app>.azurewebsites.net/runtime/webhooks/mcp`
 
@@ -380,22 +309,19 @@ Conventions:
 
 ## Connecting to Claude
 
-Add to Claude Desktop or Claude Code MCP config:
 ```json
 {
   "mcpServers": {
     "airtho": {
       "type": "http",
       "url": "https://<app>.azurewebsites.net/runtime/webhooks/mcp",
-      "headers": {
-        "x-functions-key": "<mcp_extension system key>"
-      }
+      "headers": { "x-functions-key": "<mcp_extension system key>" }
     }
   }
 }
 ```
 
-For local dev:
+For local dev (no auth header needed):
 ```json
 {
   "mcpServers": {
@@ -411,10 +337,10 @@ For local dev:
 
 ## Known Limitations
 
-- **No write operations** — read-only by design; Graph permissions are `Sites.Read.All` + `Files.Read.All`
-- **No PDF text extraction** — Graph API does not convert PDFs to text; only `.docx` conversion is supported
-- **No Excel/CSV formula evaluation** — `.xlsx` is unsupported; `.csv` is supported as plain text
-- **Content truncated at 50,000 chars** — check `truncated` flag; surface `download_url` to human if needed
-- **Search latency** — SharePoint search index may lag behind recent file changes by minutes
-- **Download URLs expire** — `download_url` from `get_file_metadata` is valid ~1 hour; request fresh metadata if stale
+- **No write operations** — read-only; Graph permissions are `Sites.Read.All` + `Files.Read.All`
+- **No PDF text extraction** — `.docx` extracted from ZIP; PDFs are not supported
+- **No Excel/CSV formula evaluation** — `.xlsx` unsupported; `.csv` supported as plain text
+- **Content truncated at 50,000 chars** — check `truncated` flag; surface `download_url` to user if needed
+- **Search latency** — SharePoint search index may lag recent file changes by minutes
+- **Drive cache** — drive list cached per cold-start; restart the function if drives change
 - **Stateless** — each tool invocation is independent; no session state across requests
