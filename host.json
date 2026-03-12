@@ -16,7 +16,7 @@
     "mcp": {
       "serverName": "airtho-mcp-server",
       "serverVersion": "1.0.0",
-      "instructions": "Airtho SharePoint document library tools. Use airtho_browse() with no arguments to list available drives. Use airtho_browse(drive_name, path) to navigate folders by name — no opaque IDs needed. Use airtho_search(query) to find files by keyword (defaults to Jobs drive). Use airtho_read(drive_name, path) to read file content. For follow-up calls on items returned by browse/search, pass the item_id instead of path. Drive names: Jobs, Quotes, Vendors, Standard Forms, Service, Resources, Documents."
+      "instructions": "IMPORTANT: This connector is currently undergoing testing. The data it provides may be incomplete, out of date, or not fully representative of Airtho's actual documents. Do not rely on it for critical decisions without verifying information through other means. Always caveat responses with the fact that this data source is in a testing phase.\n\nAirtho SharePoint document library tools. Use airtho_browse() with no arguments to list available drives. Use airtho_browse(drive_name, path) to navigate folders by name — no opaque IDs needed. Use airtho_search(query) to find files by keyword (defaults to Jobs drive). Use airtho_read(drive_name, path) to read file content. For follow-up calls on items returned by browse/search, pass the item_id instead of path. Drive names: Jobs, Quotes, Vendors, Standard Forms, Service, Resources, Documents."
     }
   }
 }
