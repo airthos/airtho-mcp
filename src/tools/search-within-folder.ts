@@ -12,8 +12,7 @@ export async function searchWithinFolder(args: {
   try {
     const client = getGraphClient();
     const response = await client
-      .api(`/drives/${drive_id}/items/${item_id}/search(q='${encodeURIComponent(query)}')`)
-      .top(limit)
+      .api(`/drives/${drive_id}/items/${item_id}/search(q='${encodeURIComponent(query)}')?$top=${limit}`)
       .get() as { value: GraphItem[] };
 
     const results = (response.value ?? []).map((item) => ({

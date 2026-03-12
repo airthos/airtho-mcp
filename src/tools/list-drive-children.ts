@@ -11,13 +11,14 @@ export async function listDriveChildren(args: {
 
   try {
     const client = getGraphClient();
+    // Note: Graph /children does not support $skip. We fetch $top items and
+    // manually skip `offset` entries when the caller requests pagination.
+    const fetchCount = limit + offset;
     const response = await client
-      .api(`/drives/${drive_id}/items/${item_id}/children`)
-      .top(limit)
-      .skip(offset)
-      .get() as { value: GraphItem[] };
+      .api(`/drives/${drive_id}/items/${item_id}/children?$top=${fetchCount}`)
+      .get() as { value: GraphItem[]; "@odata.nextLink"?: string };
 
-    const items = (response.value ?? []).map((item) => ({
+    const allItems = (response.value ?? []).map((item) => ({
       name: item.name,
       id: item.id,
       type: (item.folder ? "folder" : "file") as "file" | "folder",
@@ -25,7 +26,10 @@ export async function listDriveChildren(args: {
       size: item.size ?? null,
     }));
 
-    return { items, has_more: items.length === limit, total_returned: items.length };
+    const items = allItems.slice(offset, offset + limit);
+    const has_more = items.length === limit || !!response["@odata.nextLink"];
+
+    return { items, has_more, total_returned: items.length };
   } catch (err: unknown) {
     const e = err as { statusCode?: number; message?: string };
     if (e.statusCode === 404) {
