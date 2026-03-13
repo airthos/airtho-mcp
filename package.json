@@ -9,7 +9,9 @@
     "watch": "node --max-old-space-size=8192 node_modules/typescript/bin/tsc --watch",
     "prestart": "npm run build",
     "start": "func start",
-    "clean": "npx rimraf dist"
+    "clean": "npx rimraf dist",
+    "test": "jest",
+    "deploy": "npm test && npm run build && func azure functionapp publish airtho-mcp --node"
   },
   "engines": {
     "node": ">=18"
@@ -20,7 +22,10 @@
     "@microsoft/microsoft-graph-client": "^3.0.7"
   },
   "devDependencies": {
+    "@types/jest": "^30.0.0",
     "@types/node": "^22.0.0",
+    "jest": "^30.3.0",
+    "ts-jest": "^29.4.6",
     "typescript": "^5.7.0"
   }
 }
