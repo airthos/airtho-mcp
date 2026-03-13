@@ -1,0 +1,16 @@
+# Source TypeScript (compiled output in dist/ is what runs)
+src/
+
+# Tests
+**/__tests__/
+jest.config.ts
+
+# Dev tooling
+.github/
+.claude/
+.vscode/
+*.example
+local.settings.json
+
+# Build artifacts not needed at runtime
+tsconfig.tsbuildinfo
