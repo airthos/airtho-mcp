@@ -1,6 +1,5 @@
-import type { Config } from "jest";
-
-const config: Config = {
+/** @type {import('jest').Config} */
+module.exports = {
   testEnvironment: "node",
   testMatch: ["**/__tests__/**/*.test.ts"],
   transform: {
@@ -8,10 +7,7 @@ const config: Config = {
       tsconfig: { moduleResolution: "node" },
     }],
   },
-  // Strip .js extensions so Jest resolves .ts source files
   moduleNameMapper: {
     "^(.*)\\.js$": "$1",
   },
 };
-
-export default config;
