@@ -49,9 +49,8 @@ function toResult(result: unknown): string {
 app.mcpTool("airthoSearchJobs", {
   toolName: "airtho_search_jobs",
   description:
-    "Find Airtho jobs by keyword. Fuzzy-matches against job folder names server-side and returns a compact list. " +
-    "Omit keyword to list all jobs. Use folder_path with airtho_get_job to get full details. " +
-    "Prefer airtho_get_job if you only need one job — it returns structure in the same call.",
+    "Find jobs by keyword (fuzzy match). Omit keyword to list all. " +
+    "Prefer airtho_get_job for single job lookups — it returns structure in one call.",
   toolProperties: {
     keyword: arg.string().describe("Keyword to fuzzy-match against job names, e.g. 'factorial' or 'billerica'. Omit to list all jobs.").optional(),
     limit: arg.number().describe("Max jobs to return, 1-200 (default: 50)").optional(),
@@ -70,9 +69,8 @@ app.mcpTool("airthoSearchJobs", {
 app.mcpTool("airthoGetJob", {
   toolName: "airtho_get_job",
   description:
-    "Resolve a job by keyword and return its metadata plus top-level folder/file structure in one call. " +
-    "Use this instead of search_jobs + browse — it does both server-side. " +
-    "Returns subfolders (Engineering, Finance & admin, Submittals, etc.) and root files.",
+    "Resolve a job by keyword and return its folder/file structure in one call. " +
+    "Preferred entry point for single job lookups — replaces search_jobs + browse.",
   toolProperties: {
     keyword: arg.string().describe("Job name or number to look up, e.g. 'factorial' or '1001'"),
   },
@@ -87,9 +85,8 @@ app.mcpTool("airthoGetJob", {
 app.mcpTool("airthoFindInJob", {
   toolName: "airtho_find_in_job",
   description:
-    "Search for files within a specific job by keyword. Resolves the job and scopes the search server-side. " +
-    "Use this instead of search_jobs + airtho_search — it does both in one call. " +
-    "Returns matching file names and paths. Use airtho_read_job_file to read a result.",
+    "Search for files within a job by keyword. Resolves job and scopes search in one call. " +
+    "Use airtho_read_job_file to read a matched file.",
   toolProperties: {
     job_keyword: arg.string().describe("Job name or number, e.g. 'factorial' or '1000'"),
     file_keyword: arg.string().describe("Filename or content keyword to search for, e.g. 'meeting notes' or 'BOM'"),
@@ -110,9 +107,8 @@ app.mcpTool("airthoFindInJob", {
 app.mcpTool("airthoReadJobFile", {
   toolName: "airtho_read_job_file",
   description:
-    "Find and read a file from a job in one call. Resolves job and file server-side — no IDs needed at any step. " +
-    "Use this instead of search_jobs + find_in_job + airtho_read. " +
-    "Supports plain text, CSV, JSON, Word (.docx). Returns download URL for PDFs and Excel.",
+    "Find and read a file from a job in one call. Resolves job + file by keyword — no IDs needed. " +
+    "Supports text, CSV, JSON, Word (.docx). Returns download URL for PDFs and Excel.",
   toolProperties: {
     job_keyword: arg.string().describe("Job name or number, e.g. 'factorial' or '1002'"),
     file_keyword: arg.string().describe("Filename or content keyword, e.g. 'RFP' or 'meeting redesign'"),
@@ -131,8 +127,7 @@ app.mcpTool("airthoReadJobFile", {
 app.mcpTool("airthoGetRecentJobs", {
   toolName: "airtho_get_recent_jobs",
   description:
-    "Return the most recently modified jobs, sorted newest first. " +
-    "Useful for 'what have we been working on lately?' — no keyword needed.",
+    "Most recently modified jobs, sorted newest first. No keyword needed.",
   toolProperties: {
     limit: arg.number().describe("Number of recent jobs to return (default: 10)").optional(),
   },
@@ -147,8 +142,8 @@ app.mcpTool("airthoGetRecentJobs", {
 app.mcpTool("airthoListVendors", {
   toolName: "airtho_list_vendors",
   description:
-    "Find vendors in Airtho's Vendors drive by keyword. Server-side fuzzy match on vendor folder names. " +
-    "Omit keyword to list all vendors. Use folder_path with airtho_browse to explore a vendor's files.",
+    "Find vendors by keyword (fuzzy match). Omit keyword to list all. " +
+    "Use folder_path with airtho_browse to explore a vendor's files.",
   toolProperties: {
     keyword: arg.string().describe("Vendor name keyword, e.g. 'siemens' or 'cleanroom'. Omit to list all vendors.").optional(),
     limit: arg.number().describe("Max vendors to return (default: 50)").optional(),
@@ -167,10 +162,8 @@ app.mcpTool("airthoListVendors", {
 app.mcpTool("airthoListLists", {
   toolName: "airtho_list_lists",
   description:
-    "List all SharePoint lists on the Airtho site with their column names and types. " +
-    "Returns list names, column names, column types, and choice values in one call — " +
-    "use this first to discover what lists exist and what fields to query before calling get_list_items. " +
-    "Document libraries are excluded (covered by the job and browse tools).",
+    "Discover available SharePoint lists with column names, types, and choice values. " +
+    "Call first to learn list names and field_names before querying with get_list_items.",
   toolProperties: {
     site_name: arg.string().describe("Site name if using multiple sites (e.g. 'airtho'). Omit to use the default site.").optional(),
   },
@@ -187,10 +180,8 @@ app.mcpTool("airthoListLists", {
 app.mcpTool("airthoGetListItems", {
   toolName: "airtho_get_list_items",
   description:
-    "Fetch rows from a named SharePoint list. Use airtho_list_lists first to discover list names and column field_names. " +
-    "Pass field_names (not display names) in the columns param. " +
-    "Use filter_field + filter_value to narrow results to a single column value. " +
-    "Returns sp_id on each item — pass it to airtho_get_list_item for full details.",
+    "Fetch rows from a SharePoint list. Pass field_names (from list_lists) in columns param. " +
+    "Filter with filter_field + filter_value. Returns sp_id per item for drill-down via get_list_item.",
   toolProperties: {
     list_name: arg.string().describe("List display name or internal name, e.g. 'RFI Log'"),
     columns: arg.string().describe("Comma-separated field_names to return, e.g. 'Title,Status,DueDate'. Omit for all non-system columns.").optional(),
@@ -220,10 +211,8 @@ app.mcpTool("airthoGetListItems", {
 app.mcpTool("airthoSearchList", {
   toolName: "airtho_search_list",
   description:
-    "Search for a keyword across all text fields in a SharePoint list. " +
-    "Returns each matching item's sp_id, title, and only the fields that contained the keyword. " +
-    "Use airtho_get_list_item to fetch full details for a match. " +
-    "Note: searches the first 200 items only — see has_more if the list may have more.",
+    "Keyword search across all text fields in a SharePoint list. " +
+    "Returns sp_id, title, and matched fields only. Searches first 200 items — check has_more.",
   toolProperties: {
     list_name: arg.string().describe("List display name or internal name, e.g. 'RFI Log'"),
     keyword: arg.string().describe("Keyword to search for across all text field values"),
@@ -246,9 +235,8 @@ app.mcpTool("airthoSearchList", {
 app.mcpTool("airthoGetListItem", {
   toolName: "airtho_get_list_item",
   description:
-    "Fetch a single SharePoint list item by its sp_id. " +
-    "Use sp_id values returned by airtho_get_list_items or airtho_search_list. " +
-    "Optionally specify columns (field_names) to limit the fields returned.",
+    "Fetch a single list item by sp_id (from get_list_items or search_list). " +
+    "Optionally limit fields with columns param.",
   toolProperties: {
     list_name: arg.string().describe("List display name or internal name, e.g. 'RFI Log'"),
     item_id: arg.number().describe("The sp_id of the item to fetch (integer)"),
@@ -274,10 +262,8 @@ app.mcpTool("airthoGetListItem", {
 app.mcpTool("airthoBrowse", {
   toolName: "airtho_browse",
   description:
-    "Browse Airtho's SharePoint document libraries by path. " +
-    "Call with no arguments to list available drives. " +
-    "Call with drive_name + path to list a subfolder (e.g. path='051 Factorial/Engineering'). " +
-    "Prefer the job-specific tools (airtho_get_job, airtho_find_in_job) for job navigation — use this for non-job drives or deep subfolder browsing.",
+    "Browse document libraries by path. No args → list drives. drive_name + path → list folder contents. " +
+    "Prefer job-specific tools for job navigation; use this for non-job drives or deep browsing.",
   toolProperties: {
     drive_name: arg.string().describe("Drive name, e.g. 'Jobs', 'Quotes', 'Vendors'. Omit to list all available drives.").optional(),
     path: arg.string().describe("Path within the drive, e.g. '051 Factorial/Submittals'. Omit to list drive root. Prefer path over item_id.").optional(),
@@ -302,9 +288,8 @@ app.mcpTool("airthoBrowse", {
 app.mcpTool("airthoSearch", {
   toolName: "airtho_search",
   description:
-    "Full-text search across file names and content in any Airtho drive. Defaults to Jobs drive. " +
-    "For job-scoped searches, prefer airtho_find_in_job — it resolves the job by keyword for you. " +
-    "Use this for cross-job or non-job drive searches.",
+    "Full-text search across file names and content in a drive (default: Jobs). " +
+    "For job-scoped searches, prefer airtho_find_in_job.",
   toolProperties: {
     query: arg.string().describe("Search keywords, e.g. 'temperature review' or 'change order'"),
     drive_name: arg.string().describe("Drive to search in (default: 'Jobs')").optional(),
@@ -327,10 +312,8 @@ app.mcpTool("airthoSearch", {
 app.mcpTool("airthoRead", {
   toolName: "airtho_read",
   description:
-    "Read the text content of a file from Airtho's SharePoint by path. " +
-    "Supports: plain text, CSV, JSON, XML, HTML, Markdown, JS/TS, Word (.docx). " +
-    "For unsupported formats (PDF, Excel, images), returns a download URL to share with the user. " +
-    "For job files, prefer airtho_read_job_file — it resolves job and file by keyword without needing a full path.",
+    "Read file content by drive + path. Supports text, CSV, JSON, XML, HTML, Markdown, Word (.docx). " +
+    "Returns download URL for PDFs/Excel/images. For job files, prefer airtho_read_job_file.",
   toolProperties: {
     drive_name: arg.string().describe("Drive name, e.g. 'Jobs', 'Quotes'"),
     path: arg.string().describe("File path within the drive, e.g. '051 Factorial/Factorial_Meeting.docx'. Prefer path over item_id.").optional(),
