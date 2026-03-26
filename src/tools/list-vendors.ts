@@ -37,10 +37,49 @@ export async function listVendors(args: {
       .api(`/drives/${driveId}/items/root/children?$top=200`)
       .get() as { value: GraphItem[] };
 
-    const folders = (response.value ?? []).filter((item) => !!item.folder);
+    const topFolders = (response.value ?? []).filter((item) => !!item.folder);
     const tokens = tokenize(keyword);
 
-    let candidates = folders.map((item) => ({
+    // Detect alpha-index structure (folders like "A's", "B's", etc.)
+    const isAlphaIndex = topFolders.length > 0 &&
+      topFolders.every((f) => /^[A-Z]'?s?$/i.test(f.name.replace(/['']/g, "'")));
+
+    if (isAlphaIndex && tokens.length > 0) {
+      // Search inside alpha-index folders for actual vendor names
+      const subResults = await Promise.all(
+        topFolders.map(async (alphaFolder) => {
+          try {
+            const subResp = await client
+              .api(`/drives/${driveId}/items/${alphaFolder.id}/children?$top=200`)
+              .get() as { value: GraphItem[] };
+            return (subResp.value ?? [])
+              .filter((item) => !!item.folder)
+              .map((item) => ({
+                name: item.name,
+                parentFolder: alphaFolder.name,
+                modified: item.lastModifiedDateTime ?? null,
+                score: fuzzyScore(item.name, tokens),
+              }));
+          } catch {
+            return [];
+          }
+        }),
+      );
+
+      let candidates = subResults.flat().filter((c) => c.score > 0);
+      candidates.sort((a, b) => b.score - a.score);
+
+      const vendors: VendorResult[] = candidates.slice(0, limit).map((c) => ({
+        vendor_name: c.name,
+        folder_path: `${c.parentFolder}/${c.name}`,
+        modified: c.modified,
+      }));
+
+      return { query: keyword ?? null, vendors, total_returned: vendors.length };
+    }
+
+    // Standard flat structure or no keyword — match top-level folders
+    let candidates = topFolders.map((item) => ({
       name: item.name,
       modified: item.lastModifiedDateTime ?? null,
       score: tokens.length > 0 ? fuzzyScore(item.name, tokens) : 1,

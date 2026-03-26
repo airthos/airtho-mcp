@@ -20,7 +20,7 @@ export interface GraphItem {
   lastModifiedDateTime?: string;
   createdDateTime?: string;
   size?: number;
-  parentReference?: { id?: string; path?: string };
+  parentReference?: { id?: string; path?: string; name?: string };
   "@microsoft.graph.downloadUrl"?: string;
 }
 

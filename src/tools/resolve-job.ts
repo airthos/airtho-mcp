@@ -20,6 +20,8 @@ export interface ResolvedJob {
   _driveId: string;
   /** Graph item ID — internal use only, never expose in responses */
   _itemId: string;
+  /** Other matching job folder names, if any */
+  alternatives?: string[];
 }
 
 /**
@@ -57,13 +59,19 @@ export async function resolveJob(keyword: string): Promise<ResolvedJob | McpErro
     const best = scored[0].item;
     const { job_number, job_name } = parseJobFolder(best.name);
 
-    return {
+    const result: ResolvedJob = {
       folder_name: best.name,
       job_number,
       job_name,
       _driveId: driveId,
       _itemId: best.id,
     };
+
+    if (scored.length > 1) {
+      result.alternatives = scored.slice(1, 4).map((s) => s.item.name);
+    }
+
+    return result;
   } catch (err: unknown) {
     const e = err as { message?: string };
     return { error: "graph_error", message: e.message ?? String(err) };

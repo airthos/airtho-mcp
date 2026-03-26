@@ -6,6 +6,7 @@
 
 import { getGraphClient } from "../graph/client.js";
 import type { GraphItem, McpError } from "../types.js";
+import { listJobFiles } from "./list-job-files.js";
 import { resolveJob } from "./resolve-job.js";
 
 interface FileHit {
@@ -36,18 +37,27 @@ export async function findInJob(args: {
   const client = getGraphClient();
 
   try {
+    // Try Graph search scoped to the job folder first
     const response = await client
       .api(`/drives/${job._driveId}/items/${job._itemId}/search(q='${encodeURIComponent(file_keyword)}')?$top=${limit + 1}`)
       .get() as { value: GraphItem[] };
 
-    const all = (response.value ?? []).filter((item) => !item.folder);
+    let all = (response.value ?? []).filter((item) => !item.folder);
+
+    // Fallback: Graph search scoped to a folder is unreliable.
+    // If zero results, list children (2 levels) and match by name instead.
+    if (all.length === 0) {
+      all = await listJobFiles(client, job._driveId, job._itemId, file_keyword, job.folder_name);
+    }
+
     const has_more = all.length > limit;
     const items = all.slice(0, limit);
 
     const results: FileHit[] = items.map((item) => ({
       name: item.name,
-      // Strip the opaque drive root prefix, return a clean relative path
-      path: item.parentReference?.path?.replace(/.*root:\//, "") ?? job.folder_name,
+      path: item.parentReference?.path?.replace(/.*root:\//, "")
+        ?? item.parentReference?.name
+        ?? job.folder_name,
       size: item.size ?? null,
       modified: item.lastModifiedDateTime ?? null,
     }));

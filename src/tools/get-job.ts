@@ -22,6 +22,7 @@ interface GetJobResult {
   size: number | null;
   modified: string | null;
   contents: JobContentsItem[];
+  alternatives?: string[];
 }
 
 export async function getJob(args: {
@@ -52,7 +53,7 @@ export async function getJob(args: {
       return a.name.localeCompare(b.name);
     });
 
-    return {
+    const result: GetJobResult = {
       job_number: job.job_number,
       job_name: job.job_name,
       folder_path: job.folder_name,
@@ -60,6 +61,12 @@ export async function getJob(args: {
       modified: null,
       contents,
     };
+
+    if (job.alternatives && job.alternatives.length > 0) {
+      result.alternatives = job.alternatives;
+    }
+
+    return result;
   } catch (err: unknown) {
     const e = err as { message?: string };
     return { error: "graph_error", message: e.message ?? String(err) };

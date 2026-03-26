@@ -6,6 +6,7 @@
 
 import { getGraphClient } from "../graph/client.js";
 import type { GraphItem, McpError } from "../types.js";
+import { listJobFiles } from "./list-job-files.js";
 import { resolveJob } from "./resolve-job.js";
 import { read } from "./read.js";
 
@@ -26,7 +27,13 @@ export async function readJobFile(args: {
       .api(`/drives/${job._driveId}/items/${job._itemId}/search(q='${encodeURIComponent(file_keyword)}')?$top=5`)
       .get() as { value: GraphItem[] };
 
-    const files = (response.value ?? []).filter((item) => !item.folder);
+    let files = (response.value ?? []).filter((item) => !item.folder);
+
+    // Fallback: Graph search scoped to a folder is unreliable
+    if (files.length === 0) {
+      const matches = await listJobFiles(client, job._driveId, job._itemId, file_keyword, job.folder_name);
+      if (matches.length > 0) files = [matches[0]];
+    }
 
     if (files.length === 0) {
       return {

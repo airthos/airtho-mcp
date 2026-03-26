@@ -6,12 +6,20 @@ export interface ResolvedList {
   listDisplayName: string;
 }
 
+/** Templates that are doc libraries or internal system lists — not queryable as lists. */
+const DOC_LIB_TEMPLATES = new Set([
+  "documentLibrary", "webPageLibrary", "pictureLibrary", "xmlForm",
+  "masterPage", "webTemplateCatalog", "listTemplateCatalog", "userInformation",
+  "webPartCatalog", "solutionCatalog", "themeCatalog", "designCatalog", "appDataCatalog",
+]);
+
 type ListEntry = {
   _id: string;
   name: string;
   nameLower: string;
   displayName: string;
   displayNameLower: string;
+  isDataList: boolean;
 };
 
 /** Cache keyed by siteId — lists don't change often. */
@@ -27,7 +35,7 @@ async function loadLists(siteId: string): Promise<ListEntry[]> {
 
   const client = getGraphClient();
   const response = (await client
-    .api(`/sites/${siteId}/lists?$select=id,name,displayName`)
+    .api(`/sites/${siteId}/lists?$select=id,name,displayName,list`)
     .get()) as { value: GraphList[] };
 
   const entries = (response.value ?? []).map((l) => ({
@@ -36,6 +44,7 @@ async function loadLists(siteId: string): Promise<ListEntry[]> {
     nameLower: l.name.toLowerCase(),
     displayName: l.displayName,
     displayNameLower: l.displayName.toLowerCase(),
+    isDataList: !l.list?.hidden && !DOC_LIB_TEMPLATES.has(l.list?.template ?? ""),
   }));
 
   _listCache.set(siteId, entries);
@@ -54,15 +63,18 @@ export async function resolveList(
   try {
     const lists = await loadLists(siteId);
     const key = listName.toLowerCase();
+    const dataLists = lists.filter((l) => l.isDataList);
     const match =
-      lists.find((l) => l.displayNameLower === key) ??
-      lists.find((l) => l.nameLower === key);
+      dataLists.find((l) => l.displayNameLower === key) ??
+      dataLists.find((l) => l.nameLower === key);
 
     if (!match) {
-      const available = lists.map((l) => l.displayName).join(", ");
+      const available = dataLists
+        .map((l) => l.displayName)
+        .join(", ");
       return {
         error: "list_not_found",
-        message: `No list named '${listName}'. Available lists: ${available}`,
+        message: `No list named '${listName}'. Available lists: ${available || "(none)"}`,
       };
     }
 

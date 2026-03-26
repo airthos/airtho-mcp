@@ -49,15 +49,35 @@ export async function search(args: {
       scopeDisplay = cleanPath;
     }
 
-    const response = await client
-      .api(`/drives/${driveId}/items/${scopeItemId}/search(q='${encodeURIComponent(query)}')?$top=${limit}`)
+    let response = await client
+      .api(`/drives/${driveId}/items/${scopeItemId}/search(q='${encodeURIComponent(query)}')?$top=${limit + 1}`)
       .get() as { value: GraphItem[] };
 
-    const results = (response.value ?? []).map((item): SearchHit => ({
+    let raw = response.value ?? [];
+
+    // Fallback: Graph search scoped to a subfolder is unreliable.
+    // If zero results and we were scoped, retry at drive root and filter client-side.
+    if (raw.length === 0 && scopeItemId !== "root") {
+      response = await client
+        .api(`/drives/${driveId}/items/root/search(q='${encodeURIComponent(query)}')?$top=200`)
+        .get() as { value: GraphItem[] };
+
+      const scopePath = `root:/${scopeDisplay}`;
+      raw = (response.value ?? []).filter(
+        (item) =>
+          item.parentReference?.path?.includes(scopePath) ||
+          item.parentReference?.id === scopeItemId
+      );
+    }
+
+    const has_more = raw.length > limit;
+    const results = raw.slice(0, limit).map((item): SearchHit => ({
       name: item.name,
       item_id: item.id,
       type: item.folder ? "folder" : "file",
-      path: item.parentReference?.path?.replace(/.*root:/, "") ?? null,
+      path: item.parentReference?.path?.replace(/.*root:/, "")
+        || item.parentReference?.name
+        || null,
       modified: item.lastModifiedDateTime ?? null,
       size: item.size ?? null,
     }));
@@ -67,7 +87,7 @@ export async function search(args: {
       query,
       scoped_to: scopeDisplay,
       results,
-      has_more: results.length === limit,
+      has_more,
       total_returned: results.length,
     };
   } catch (err: unknown) {

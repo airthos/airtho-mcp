@@ -41,6 +41,13 @@ function getArgs(context: InvocationContext): Record<string, unknown> {
   return (context.triggerMetadata?.mcptoolargs as Record<string, unknown>) ?? {};
 }
 
+/** Safely coerce MCP args (which arrive as strings) to number. */
+function numArg(val: unknown): number | undefined {
+  if (val === undefined || val === null) return undefined;
+  const n = Number(val);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 function toResult(result: unknown): string {
   return JSON.stringify(result, null, 2);
 }
@@ -59,7 +66,7 @@ app.mcpTool("airthoSearchJobs", {
     const args = getArgs(context);
     const result = await searchJobs({
       keyword: args.keyword as string | undefined,
-      limit: args.limit as number | undefined,
+      limit: numArg(args.limit),
     });
     return toResult(result);
   },
@@ -97,7 +104,7 @@ app.mcpTool("airthoFindInJob", {
     const result = await findInJob({
       job_keyword: args.job_keyword as string,
       file_keyword: args.file_keyword as string,
-      limit: args.limit as number | undefined,
+      limit: numArg(args.limit),
     });
     return toResult(result);
   },
@@ -133,7 +140,7 @@ app.mcpTool("airthoGetRecentJobs", {
   },
   handler: async (_toolArgs: unknown, context: InvocationContext): Promise<string> => {
     const args = getArgs(context);
-    const result = await getRecentJobs({ limit: args.limit as number | undefined });
+    const result = await getRecentJobs({ limit: numArg(args.limit) });
     return toResult(result);
   },
 });
@@ -152,7 +159,7 @@ app.mcpTool("airthoListVendors", {
     const args = getArgs(context);
     const result = await listVendors({
       keyword: args.keyword as string | undefined,
-      limit: args.limit as number | undefined,
+      limit: numArg(args.limit),
     });
     return toResult(result);
   },
@@ -200,7 +207,7 @@ app.mcpTool("airthoGetListItems", {
       columns,
       filter_field: args.filter_field as string | undefined,
       filter_value: args.filter_value as string | undefined,
-      limit: args.limit as number | undefined,
+      limit: numArg(args.limit),
       site_name: args.site_name as string | undefined,
     });
     return toResult(result);
@@ -224,7 +231,7 @@ app.mcpTool("airthoSearchList", {
     const result = await searchList({
       list_name: args.list_name as string,
       keyword: args.keyword as string,
-      limit: args.limit as number | undefined,
+      limit: numArg(args.limit),
       site_name: args.site_name as string | undefined,
     });
     return toResult(result);
@@ -250,7 +257,7 @@ app.mcpTool("airthoGetListItem", {
       : undefined;
     const result = await getListItem({
       list_name: args.list_name as string,
-      item_id: args.item_id as number,
+      item_id: numArg(args.item_id) ?? 0,
       columns,
       site_name: args.site_name as string | undefined,
     });
@@ -277,8 +284,8 @@ app.mcpTool("airthoBrowse", {
       drive_name: args.drive_name as string | undefined,
       path: args.path as string | undefined,
       item_id: args.item_id as string | undefined,
-      limit: args.limit as number | undefined,
-      offset: args.offset as number | undefined,
+      limit: numArg(args.limit),
+      offset: numArg(args.offset),
     });
     return toResult(result);
   },
@@ -302,7 +309,7 @@ app.mcpTool("airthoSearch", {
       query: args.query as string,
       drive_name: args.drive_name as string | undefined,
       folder_path: args.folder_path as string | undefined,
-      limit: args.limit as number | undefined,
+      limit: numArg(args.limit),
     });
     return toResult(result);
   },
