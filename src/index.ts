@@ -14,6 +14,7 @@
  */
 
 import { app, InvocationContext, arg } from "@azure/functions";
+import "./favicon.js";
 import { browse } from "./tools/browse.js";
 import { search } from "./tools/search.js";
 import { read } from "./tools/read.js";
@@ -23,6 +24,10 @@ import { findInJob } from "./tools/find-in-job.js";
 import { readJobFile } from "./tools/read-job-file.js";
 import { getRecentJobs } from "./tools/get-recent-jobs.js";
 import { listVendors } from "./tools/list-vendors.js";
+import { listLists } from "./tools/list-lists.js";
+import { getListItems } from "./tools/get-list-items.js";
+import { searchList } from "./tools/search-list.js";
+import { getListItem } from "./tools/get-list-item.js";
 
 // ── Env validation ────────────────────────────────────────────────────────────
 const REQUIRED_ENV = ["TENANT_ID", "CLIENT_ID", "CLIENT_SECRET"] as const;
@@ -153,6 +158,113 @@ app.mcpTool("airthoListVendors", {
     const result = await listVendors({
       keyword: args.keyword as string | undefined,
       limit: args.limit as number | undefined,
+    });
+    return toResult(result);
+  },
+});
+
+// ── airtho_list_lists ─────────────────────────────────────────────────────────
+app.mcpTool("airthoListLists", {
+  toolName: "airtho_list_lists",
+  description:
+    "List all SharePoint lists on the Airtho site with their column names and types. " +
+    "Returns list names, column names, column types, and choice values in one call — " +
+    "use this first to discover what lists exist and what fields to query before calling get_list_items. " +
+    "Document libraries are excluded (covered by the job and browse tools).",
+  toolProperties: {
+    site_name: arg.string().describe("Site name if using multiple sites (e.g. 'airtho'). Omit to use the default site.").optional(),
+  },
+  handler: async (_toolArgs: unknown, context: InvocationContext): Promise<string> => {
+    const args = getArgs(context);
+    const result = await listLists({
+      site_name: args.site_name as string | undefined,
+    });
+    return toResult(result);
+  },
+});
+
+// ── airtho_get_list_items ─────────────────────────────────────────────────────
+app.mcpTool("airthoGetListItems", {
+  toolName: "airtho_get_list_items",
+  description:
+    "Fetch rows from a named SharePoint list. Use airtho_list_lists first to discover list names and column field_names. " +
+    "Pass field_names (not display names) in the columns param. " +
+    "Use filter_field + filter_value to narrow results to a single column value. " +
+    "Returns sp_id on each item — pass it to airtho_get_list_item for full details.",
+  toolProperties: {
+    list_name: arg.string().describe("List display name or internal name, e.g. 'RFI Log'"),
+    columns: arg.string().describe("Comma-separated field_names to return, e.g. 'Title,Status,DueDate'. Omit for all non-system columns.").optional(),
+    filter_field: arg.string().describe("Column field_name to filter on, e.g. 'Status'").optional(),
+    filter_value: arg.string().describe("Value to match (eq), e.g. 'Open'").optional(),
+    limit: arg.number().describe("Max rows to return, 1-200 (default: 50)").optional(),
+    site_name: arg.string().describe("Site name if using multiple sites. Omit for default site.").optional(),
+  },
+  handler: async (_toolArgs: unknown, context: InvocationContext): Promise<string> => {
+    const args = getArgs(context);
+    const columns = args.columns
+      ? (args.columns as string).split(",").map((c) => c.trim()).filter(Boolean)
+      : undefined;
+    const result = await getListItems({
+      list_name: args.list_name as string,
+      columns,
+      filter_field: args.filter_field as string | undefined,
+      filter_value: args.filter_value as string | undefined,
+      limit: args.limit as number | undefined,
+      site_name: args.site_name as string | undefined,
+    });
+    return toResult(result);
+  },
+});
+
+// ── airtho_search_list ────────────────────────────────────────────────────────
+app.mcpTool("airthoSearchList", {
+  toolName: "airtho_search_list",
+  description:
+    "Search for a keyword across all text fields in a SharePoint list. " +
+    "Returns each matching item's sp_id, title, and only the fields that contained the keyword. " +
+    "Use airtho_get_list_item to fetch full details for a match. " +
+    "Note: searches the first 200 items only — see has_more if the list may have more.",
+  toolProperties: {
+    list_name: arg.string().describe("List display name or internal name, e.g. 'RFI Log'"),
+    keyword: arg.string().describe("Keyword to search for across all text field values"),
+    limit: arg.number().describe("Max matching items to return (default: 20)").optional(),
+    site_name: arg.string().describe("Site name if using multiple sites. Omit for default site.").optional(),
+  },
+  handler: async (_toolArgs: unknown, context: InvocationContext): Promise<string> => {
+    const args = getArgs(context);
+    const result = await searchList({
+      list_name: args.list_name as string,
+      keyword: args.keyword as string,
+      limit: args.limit as number | undefined,
+      site_name: args.site_name as string | undefined,
+    });
+    return toResult(result);
+  },
+});
+
+// ── airtho_get_list_item ──────────────────────────────────────────────────────
+app.mcpTool("airthoGetListItem", {
+  toolName: "airtho_get_list_item",
+  description:
+    "Fetch a single SharePoint list item by its sp_id. " +
+    "Use sp_id values returned by airtho_get_list_items or airtho_search_list. " +
+    "Optionally specify columns (field_names) to limit the fields returned.",
+  toolProperties: {
+    list_name: arg.string().describe("List display name or internal name, e.g. 'RFI Log'"),
+    item_id: arg.number().describe("The sp_id of the item to fetch (integer)"),
+    columns: arg.string().describe("Comma-separated field_names to return. Omit for all non-system columns.").optional(),
+    site_name: arg.string().describe("Site name if using multiple sites. Omit for default site.").optional(),
+  },
+  handler: async (_toolArgs: unknown, context: InvocationContext): Promise<string> => {
+    const args = getArgs(context);
+    const columns = args.columns
+      ? (args.columns as string).split(",").map((c) => c.trim()).filter(Boolean)
+      : undefined;
+    const result = await getListItem({
+      list_name: args.list_name as string,
+      item_id: args.item_id as number,
+      columns,
+      site_name: args.site_name as string | undefined,
     });
     return toResult(result);
   },

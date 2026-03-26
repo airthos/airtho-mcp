@@ -23,3 +23,36 @@ export interface GraphItem {
   parentReference?: { id?: string; path?: string };
   "@microsoft.graph.downloadUrl"?: string;
 }
+
+export interface GraphListColumn {
+  id: string;
+  name: string;
+  displayName: string;
+  hidden?: boolean;
+  readOnly?: boolean;
+  required?: boolean;
+  text?: Record<string, unknown>;
+  number?: Record<string, unknown>;
+  dateTime?: Record<string, unknown>;
+  choice?: { choices?: string[]; allowTextEntry?: boolean };
+  boolean?: Record<string, unknown>;
+  lookup?: Record<string, unknown>;
+  personOrGroup?: Record<string, unknown>;
+  currency?: Record<string, unknown>;
+  calculated?: Record<string, unknown>;
+  hyperlink?: Record<string, unknown>;
+}
+
+export interface GraphList {
+  id: string;
+  name: string;
+  displayName: string;
+  description?: string;
+  list?: { hidden?: boolean; template?: string };
+  columns?: GraphListColumn[];
+}
+
+export interface GraphListItem {
+  id: string; // SharePoint integer ID as string (e.g. "5") — NOT a GUID
+  fields?: Record<string, unknown>;
+}

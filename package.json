@@ -5,7 +5,7 @@
   "main": "dist/index.js",
   "scripts": {
     "prebuild": "npx rimraf tsconfig.tsbuildinfo",
-    "build": "node --max-old-space-size=8192 node_modules/typescript/bin/tsc",
+    "build": "node --max-old-space-size=8192 node_modules/typescript/bin/tsc && node -e \"require('fs').cpSync('src/assets','dist/assets',{recursive:true})\"",
     "watch": "node --max-old-space-size=8192 node_modules/typescript/bin/tsc --watch",
     "prestart": "npm run build",
     "start": "func start",
