@@ -65,8 +65,10 @@ function jsonResponse(body: unknown, status = 200, headers?: Record<string, stri
  */
 async function authenticate(request: HttpRequest): Promise<string | null | HttpResponseInit> {
   const raw = extractBearerToken(request.headers.get("authorization"));
+  console.log("[Auth] Method:", request.method, "Path:", new URL(request.url).pathname, "Has token:", !!raw);
 
   if (!raw && REQUIRE_AUTH) {
+    console.log("[Auth] No token, returning 401");
     const resourceUrl = getResourceUrl(request);
     return {
       status: 401,
@@ -80,6 +82,7 @@ async function authenticate(request: HttpRequest): Promise<string | null | HttpR
 
   if (raw) {
     const claims = await validateToken(raw);
+    console.log("[Auth] Token validation result:", claims ? `OK (${claims.preferred_username})` : "FAILED");
     if (!claims) {
       return jsonResponse({ error: "invalid_token", message: "Token validation failed" }, 401);
     }

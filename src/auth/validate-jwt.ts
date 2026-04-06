@@ -81,7 +81,8 @@ export async function validateToken(token: string): Promise<UserClaims | null> {
       sub: verified.sub as string,
       scp: verified.scp as string | undefined,
     };
-  } catch {
+  } catch (err) {
+    console.log("[JWT] Validation error:", (err as Error).message);
     return null;
   }
 }
