@@ -112,16 +112,23 @@ export async function handleRegister(request: HttpRequest): Promise<HttpResponse
 
   registeredClients.set(clientId, registration);
 
+  // Mirror back what Claude requested. Include a client_secret since Claude
+  // registered with token_endpoint_auth_method: "client_secret_post".
+  const requestedAuthMethod = (body.token_endpoint_auth_method as string) ?? "client_secret_post";
+  const clientSecret = process.env.CLIENT_SECRET!;
+
   return {
     status: 201,
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       client_id: clientId,
+      client_secret: clientSecret,
       client_name: clientName,
       redirect_uris: redirectUris,
-      token_endpoint_auth_method: "none",
+      token_endpoint_auth_method: requestedAuthMethod,
       grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],
+      scope: (body.scope as string) ?? `api://${clientId}/mcp.access offline_access`,
     }),
   };
 }
