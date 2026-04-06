@@ -1,9 +1,9 @@
 /**
  * RFC 9728 — OAuth 2.0 Protected Resource Metadata.
  *
- * Returns a JSON document that tells MCP clients (Claude.ai) where and how
- * to obtain access tokens for this server. Claude.ai fetches this
- * automatically when a user adds the connector URL.
+ * Returns a JSON document that tells MCP clients (Claude) where and how
+ * to obtain access tokens for this server. Points to ourselves as the
+ * authorization server — we proxy OAuth requests to Entra ID.
  *
  * Endpoint: GET /.well-known/oauth-protected-resource
  */
@@ -22,13 +22,9 @@ export interface ProtectedResourceMetadata {
  *                      e.g. "https://airtho-mcp.azurewebsites.net"
  */
 export function buildProtectedResourceMetadata(resourceUrl: string): ProtectedResourceMetadata {
-  const tenantId = process.env.TENANT_ID!;
-
   return {
     resource: resourceUrl,
-    authorization_servers: [
-      `https://login.microsoftonline.com/${tenantId}/v2.0`,
-    ],
+    authorization_servers: [resourceUrl],
     bearer_methods_supported: ["header"],
     scopes_supported: [
       `api://${process.env.CLIENT_ID!}/mcp.access`,

@@ -22,6 +22,13 @@ import { createMcpServer } from "./mcp-server.js";
 import { extractBearerToken, validateToken } from "./auth/validate-jwt.js";
 import { buildProtectedResourceMetadata } from "./auth/metadata.js";
 import { runWithToken } from "./auth/token-store.js";
+import {
+  handleAuthServerMetadata,
+  handleRegister,
+  handleAuthorize,
+  handleCallback,
+  handleToken,
+} from "./auth/proxy.js";
 import "./favicon.js";
 
 // ── Env validation ────────────────────────────────────────────────────────────
@@ -90,6 +97,55 @@ app.http("wellKnown", {
   authLevel: "anonymous",
   handler: async (request: HttpRequest): Promise<HttpResponseInit> => {
     return jsonResponse(buildProtectedResourceMetadata(getResourceUrl(request)));
+  },
+});
+
+// ── RFC 8414 — Authorization Server Metadata ──────────────────────────────────
+
+app.http("authServerMetadata", {
+  methods: ["GET"],
+  route: ".well-known/oauth-authorization-server",
+  authLevel: "anonymous",
+  handler: async (request: HttpRequest): Promise<HttpResponseInit> => {
+    return handleAuthServerMetadata(request);
+  },
+});
+
+// ── OAuth Proxy Endpoints ─────────────────────────────────────────────────────
+
+app.http("oauthRegister", {
+  methods: ["POST"],
+  route: "register",
+  authLevel: "anonymous",
+  handler: async (request: HttpRequest): Promise<HttpResponseInit> => {
+    return handleRegister(request);
+  },
+});
+
+app.http("oauthAuthorize", {
+  methods: ["GET"],
+  route: "authorize",
+  authLevel: "anonymous",
+  handler: async (request: HttpRequest): Promise<HttpResponseInit> => {
+    return handleAuthorize(request);
+  },
+});
+
+app.http("oauthCallback", {
+  methods: ["GET"],
+  route: "callback",
+  authLevel: "anonymous",
+  handler: async (request: HttpRequest): Promise<HttpResponseInit> => {
+    return handleCallback(request);
+  },
+});
+
+app.http("oauthToken", {
+  methods: ["POST"],
+  route: "token",
+  authLevel: "anonymous",
+  handler: async (request: HttpRequest): Promise<HttpResponseInit> => {
+    return handleToken(request);
   },
 });
 

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-An MCP (Model Context Protocol) server that exposes Airtho's Microsoft SharePoint/OneDrive document libraries to Claude via the Microsoft Graph API. It uses the native Azure Functions MCP binding (`app.mcpTool()`) — the Functions runtime handles MCP protocol natively. All tools are read-only.
+An MCP (Model Context Protocol) server that exposes Airtho's Microsoft SharePoint/OneDrive document libraries to Claude via the Microsoft Graph API. Uses the MCP SDK (`@modelcontextprotocol/sdk`) with Azure Functions v4 HTTP triggers. Per-user OAuth 2.1 authentication via Entra ID — each Claude user authenticates individually, and Graph API calls run under their identity via the On-Behalf-Of (OBO) flow. All tools are read-only.
 
 ## Commands
 
@@ -18,7 +18,7 @@ npm run build
 # Start locally (builds first, then runs func start)
 npm start
 
-# Local MCP endpoint: http://localhost:7071/runtime/webhooks/mcp
+# Local MCP endpoint: http://localhost:7071/mcp
 
 # Deploy to Azure
 func azure functionapp publish airtho-mcp --node
@@ -33,35 +33,51 @@ npm run clean
 - Azure Functions Core Tools v4: `npm install -g azure-functions-core-tools@4`
 - `local.settings.json` filled with real credentials (copy from `local.settings.json.example`)
 - Azurite for local storage emulation: `npm install -g azurite && azurite --silent --location /tmp/azurite &` (or replace `UseDevelopmentStorage=true` with a real Azure Storage connection string)
+- Set `REQUIRE_AUTH=false` to skip OAuth for local dev (tools fall back to service account)
 
 ## Architecture
 
+### MCP Transport
+
+The server uses `WebStandardStreamableHTTPServerTransport` from the MCP SDK, served via Azure Functions HTTP triggers. This replaced the native `app.mcpTool()` binding to enable access to HTTP `Authorization` headers for per-user auth.
+
+Entry point: `src/index.ts` registers HTTP routes (`/mcp`, `/authorize`, `/token`, `/callback`, `/register`, `/.well-known/*`).
+
 ### Tool Registration
 
-All MCP tools are registered in [src/index.ts](src/index.ts) via `app.mcpTool()`. There are **3 high-level tools**:
+All 13 MCP tools are registered in `src/mcp-server.ts` via the MCP SDK's `McpServer.tool()` with Zod input schemas. Tool implementations live in `src/tools/*.ts`.
 
-| Tool | Function | Purpose |
-|---|---|---|
-| `airtho_browse` | `browse()` | Navigate drives/folders by name or path; list drives with no args |
-| `airtho_search` | `search()` | Full-text + filename search, scoped to a drive or subfolder |
-| `airtho_read` | `read()` | Read file text content; returns download URL for unsupported types |
+| Category | Tools |
+|---|---|
+| Job tools | `airtho_search_jobs`, `airtho_get_job`, `airtho_find_in_job`, `airtho_read_job_file`, `airtho_get_recent_jobs` |
+| Drive tools | `airtho_browse`, `airtho_search`, `airtho_read` |
+| Vendor tools | `airtho_list_vendors` |
+| List tools | `airtho_list_lists`, `airtho_get_list_items`, `airtho_search_list`, `airtho_get_list_item` |
 
-Tools use `airtho_` prefix to avoid conflicts with Microsoft's M365 MCP connector. Registration names are camelCase (`airthoBrowse`), tool names are snake_case (`airtho_browse`).
+Tools use `airtho_` prefix to avoid conflicts with Microsoft's M365 MCP connector.
 
-### Tool Argument Extraction
+### OAuth 2.1 Authentication
 
-Tool args are **not** in the `_toolArgs` parameter — they must be extracted via:
-```typescript
-context.triggerMetadata?.mcptoolargs as Record<string, unknown>
-```
+Claude requires the MCP server to act as its own OAuth authorization server (Entra ID doesn't support Dynamic Client Registration). The server implements an OAuth proxy in `src/auth/proxy.ts`:
+
+| Endpoint | Purpose |
+|---|---|
+| `/.well-known/oauth-protected-resource` | RFC 9728 — tells Claude where to get tokens (points to ourselves) |
+| `/.well-known/oauth-authorization-server` | RFC 8414 — advertises our OAuth endpoints |
+| `/register` | DCR — accepts Claude's client registration, returns our Entra client_id |
+| `/authorize` | Redirects to Entra ID login with our app credentials |
+| `/callback` | Receives Entra redirect after login, redirects back to Claude with auth code |
+| `/token` | Exchanges auth code with Entra, returns access token to Claude |
+
+The token Claude receives is an Entra ID access token. Tool handlers read it from `AsyncLocalStorage` (`src/auth/token-store.ts`) and use it for OBO Graph calls.
 
 ### Graph Client (`src/graph/client.ts`)
 
-Lazy singleton pattern. Two exports:
-- `getGraphClient()` — returns a `@microsoft/microsoft-graph-client` `Client` instance (for standard Graph SDK calls)
-- `getBearerToken()` — returns a raw bearer token string (for direct `fetch()` calls, e.g. file content download)
+Two modes:
+- `getGraphClient(userToken)` — OBO flow: exchanges user token for a Graph token acting as that user (production)
+- `getGraphClient()` — service account singleton via `ClientSecretCredential` (local dev fallback)
 
-Both are initialized once per Function worker instance and reused across warm invocations.
+OBO logic lives in `src/auth/obo.ts`. All tool and resolver files accept an optional `userToken` parameter.
 
 ### TypeScript Config
 
@@ -69,36 +85,41 @@ Both are initialized once per Function worker instance and reused across warm in
 - Source uses `import` syntax; TypeScript compiles to `require()`
 - `"strict": true`, `"esModuleInterop": true`
 
-### MCP Config
-
-Server-level instructions and metadata live in `host.json` under `extensions.mcp`. This is where drive name hints are surfaced to Claude.
-
 ## Environment Variables
 
 | Variable | Required | Description |
 |---|---|---|
-| `TENANT_ID` | YES | Azure AD tenant ID (GUID) |
+| `TENANT_ID` | YES | Entra ID tenant ID (GUID) |
 | `CLIENT_ID` | YES | App registration client ID (GUID) |
 | `CLIENT_SECRET` | YES | App registration client secret |
 | `DEFAULT_SITE_ID` | NO | Fallback SharePoint site ID — format: `airtho.sharepoint.com,<guid>,<guid>` |
+| `REQUIRE_AUTH` | NO | Set to `"false"` to disable OAuth (local dev). Default: `"true"` |
+| `MCP_RESOURCE_URI` | NO | Public URL of the server. Auto-detected from request headers if not set |
 
 Missing `TENANT_ID`/`CLIENT_ID`/`CLIENT_SECRET` throws on module load (validated in `src/index.ts`).
 
 Local dev: vars go in `local.settings.json` under `Values`. Azure reads them from Application Settings.
 
+### Entra ID App Registration Requirements
+
+- **Application permissions**: `Sites.Read.All` (for service account fallback)
+- **Delegated permissions**: `Sites.Read.All`, `Files.Read.All`, `User.Read`
+- **Expose an API**: scope `api://<CLIENT_ID>/mcp.access` (admins and users can consent)
+- **Redirect URI**: `https://<your-azure-app>.azurewebsites.net/callback` (Web platform)
+- **Allow public client flows**: No (only needed for device code testing)
+
 ## Adding a New Tool
 
-1. Create `src/tools/<tool-name>.ts` — export an async function returning typed result or `McpError`
-2. Import and register in `src/index.ts` with `app.mcpTool()`
-3. Use `arg.string().describe("...")` for required props; add `.optional()` for optional ones
-4. Extract args via `context.triggerMetadata?.mcptoolargs`
-5. Return `JSON.stringify(result, null, 2)` from the handler
-6. Always return `McpError` from catch blocks, never throw
+1. Create `src/tools/<tool-name>.ts` — export an async function with `userToken?: string` parameter, returning typed result or `McpError`
+2. Import and register in `src/mcp-server.ts` with `server.tool()` and a Zod input schema
+3. Use `getUserToken()` from `src/auth/token-store.ts` and pass it to the tool function
+4. Pass `userToken` to `getGraphClient(userToken)` for per-user Graph calls
+5. Always return `McpError` from catch blocks, never throw
 
 ## Important Notes
 
-- **AGENT_REFERENCE.md is outdated** — it describes the old 6 low-level tools. The codebase was refactored to 3 high-level tools (`browse`, `search`, `read`).
 - **MCP is text-only** — files are returned as extracted strings, never binary
 - **Content truncated at 50,000 chars** (`CHARACTER_LIMIT` in `src/constants.ts`) — check `truncated` flag; surface `download_url` to the user if needed
-- **No PDF text extraction** — `.docx` is supported via Graph `?format=text`; PDFs are not
+- **No PDF text extraction** — `.docx` is supported via native ZIP parsing; PDFs are not (liteparse exploration stashed)
 - **`local.settings.json` and `.env` must never be committed** — they contain real credentials
+- **OAuth proxy state is in-memory** — pending auth codes and DCR registrations are lost on worker restart; this is fine because the OAuth flow completes in seconds
