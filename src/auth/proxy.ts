@@ -13,12 +13,14 @@
  *   Server → GET  /callback         → we redirect back to Claude with auth code
  *   Claude → POST /token            → we exchange code with Entra, return token
  *
- * The token Claude receives is an Entra ID access token scoped to our app.
- * Tool handlers use it for OBO Graph calls.
+ * The token Claude receives is an opaque session ID (UUID), not the raw
+ * Entra JWT. The real Entra token is cached server-side and used for OBO
+ * Graph calls when Claude sends the session ID as a Bearer token.
  */
 
 import { HttpRequest, HttpResponseInit } from "@azure/functions";
 import { randomUUID, createHash } from "node:crypto";
+import { createSession } from "./sessions.js";
 
 // ── In-memory stores (per worker instance) ────────────────────────────────────
 
@@ -297,6 +299,7 @@ export async function handleToken(request: HttpRequest): Promise<HttpResponseIni
     console.log("[OAuth Proxy] Entra token response:", entraResponse.status, JSON.stringify(entraResult));
 
     if (!entraResponse.ok) {
+      console.log("[OAuth Proxy] Entra token error:", JSON.stringify(entraResult));
       return {
         status: entraResponse.status,
         headers: { "content-type": "application/json" },
@@ -304,24 +307,25 @@ export async function handleToken(request: HttpRequest): Promise<HttpResponseIni
       };
     }
 
-    // Return a clean OAuth 2.0 token response — strip Entra-specific fields
-    // that Claude may not expect (ext_expires_in, id_token, etc.)
-    const cleanResponse: Record<string, unknown> = {
-      access_token: entraResult.access_token,
-      token_type: entraResult.token_type ?? "Bearer",
-      expires_in: entraResult.expires_in,
-      scope: entraResult.scope,
-    };
-    if (entraResult.refresh_token) {
-      cleanResponse.refresh_token = entraResult.refresh_token;
-    }
+    // Create an opaque session token — Claude gets a UUID, not the Entra JWT.
+    // The real Entra token is cached server-side for OBO Graph calls.
+    const sessionId = createSession({
+      access_token: entraResult.access_token as string,
+      refresh_token: entraResult.refresh_token as string | undefined,
+      expires_in: entraResult.expires_in as number,
+    });
 
-    console.log("[OAuth Proxy] Returning clean token response with keys:", Object.keys(cleanResponse).join(", "));
+    console.log("[OAuth Proxy] Created session, returning opaque token");
 
     return {
       status: 200,
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(cleanResponse),
+      body: JSON.stringify({
+        access_token: sessionId,
+        token_type: "Bearer",
+        expires_in: entraResult.expires_in,
+        scope: entraResult.scope,
+      }),
     };
   }
 

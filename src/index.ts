@@ -2,13 +2,13 @@
  * Airtho MCP Server — Azure Functions v4 with MCP SDK (Web Standard transport)
  *
  * Serves the MCP protocol over Streamable HTTP with per-user OAuth 2.1
- * authentication via Entra ID. Each Claude.ai user authenticates with
+ * authentication via Entra ID. Each Claude user authenticates with
  * their Microsoft account; Graph API calls run under their identity
  * via the On-Behalf-Of (OBO) flow.
  *
- * Uses the MCP SDK's WebStandardStreamableHTTPServerTransport which works
- * natively with Azure Functions v4's Web API Request/Response — no Express
- * adapter or fake stream objects needed.
+ * Auth uses opaque session tokens — Claude receives a UUID, not the raw
+ * Entra JWT. The real token is cached server-side for OBO Graph calls.
+ * SSE responses are streamed via ReadableStream (not buffered).
  *
  * Local dev:  func start  →  http://localhost:7071/mcp
  * Deployed:   https://<app>.azurewebsites.net/mcp
@@ -19,7 +19,8 @@ import { randomUUID } from "node:crypto";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { createMcpServer } from "./mcp-server.js";
-import { extractBearerToken, validateToken } from "./auth/validate-jwt.js";
+import { extractBearerToken } from "./auth/validate-jwt.js";
+import { resolveSession } from "./auth/sessions.js";
 import { buildProtectedResourceMetadata } from "./auth/metadata.js";
 import { runWithToken } from "./auth/token-store.js";
 import {
@@ -41,7 +42,7 @@ if (missing.length > 0) {
 const REQUIRE_AUTH = process.env.REQUIRE_AUTH !== "false";
 
 // ── MCP session management ────────────────────────────────────────────────────
-const sessions = new Map<string, WebStandardStreamableHTTPServerTransport>();
+const mcpSessions = new Map<string, WebStandardStreamableHTTPServerTransport>();
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -59,9 +60,14 @@ function jsonResponse(body: unknown, status = 200, headers?: Record<string, stri
 }
 
 /**
- * Validate the Bearer token on the request.
- * Returns the raw token string (for OBO) or null (unauthenticated).
- * Returns an HttpResponseInit if auth fails (send it back directly).
+ * Authenticate the request using opaque session tokens or raw Entra JWTs.
+ *
+ * - Opaque token (UUID): look up cached Entra token from sessions.ts
+ * - Raw JWT (starts with "eyJ"): validate directly (for CLI/curl testing)
+ * - No token + REQUIRE_AUTH: return 401 with RFC 9728 metadata pointer
+ * - No token + !REQUIRE_AUTH: allow through (local dev)
+ *
+ * Returns the real Entra access token (for OBO), null, or an error response.
  */
 async function authenticate(request: HttpRequest): Promise<string | null | HttpResponseInit> {
   const raw = extractBearerToken(request.headers.get("authorization"));
@@ -81,12 +87,27 @@ async function authenticate(request: HttpRequest): Promise<string | null | HttpR
   }
 
   if (raw) {
-    const claims = await validateToken(raw);
-    console.log("[Auth] Token validation result:", claims ? `OK (${claims.preferred_username})` : "FAILED");
-    if (!claims) {
-      return jsonResponse({ error: "invalid_token", message: "Token validation failed" }, 401);
+    // Try opaque session token first (UUID format from our /token endpoint)
+    const session = resolveSession(raw);
+    if (session) {
+      console.log("[Auth] Session token resolved OK");
+      return session.accessToken; // Return the real Entra token for OBO
     }
-    return raw;
+
+    // Try raw JWT (for device code flow / CLI testing)
+    if (raw.startsWith("eyJ")) {
+      const { validateToken } = await import("./auth/validate-jwt.js");
+      const claims = await validateToken(raw);
+      if (claims) {
+        console.log("[Auth] JWT validated OK:", claims.preferred_username);
+        return raw;
+      }
+      console.log("[Auth] JWT validation failed");
+    } else {
+      console.log("[Auth] Unknown token format (not session ID or JWT)");
+    }
+
+    return jsonResponse({ error: "invalid_token", message: "Token validation failed" }, 401);
   }
 
   return null; // No token, auth not required (local dev)
@@ -196,20 +217,20 @@ app.http("mcp", {
 
       let transport: WebStandardStreamableHTTPServerTransport;
 
-      if (sessionId && sessions.has(sessionId)) {
-        transport = sessions.get(sessionId)!;
+      if (sessionId && mcpSessions.has(sessionId)) {
+        transport = mcpSessions.get(sessionId)!;
       } else if (!sessionId && isInitializeRequest(parsedBody)) {
         // New session
         transport = new WebStandardStreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (sid) => {
-            sessions.set(sid, transport);
+            mcpSessions.set(sid, transport);
           },
         });
 
         transport.onclose = () => {
           const sid = transport.sessionId;
-          if (sid) sessions.delete(sid);
+          if (sid) mcpSessions.delete(sid);
         };
 
         const server = createMcpServer();
@@ -226,25 +247,25 @@ app.http("mcp", {
         transport.handleRequest(webRequest, { parsedBody }),
       );
 
-      return convertWebResponse(webResponse);
+      return streamWebResponse(webResponse);
     }
 
     if (request.method === "GET") {
-      if (!sessionId || !sessions.has(sessionId)) {
+      if (!sessionId || !mcpSessions.has(sessionId)) {
         return jsonResponse({ error: "invalid_session" }, 400);
       }
       const webResponse = await runWithToken(userToken, () =>
-        sessions.get(sessionId)!.handleRequest(webRequest),
+        mcpSessions.get(sessionId)!.handleRequest(webRequest),
       );
-      return convertWebResponse(webResponse);
+      return streamWebResponse(webResponse);
     }
 
     if (request.method === "DELETE") {
-      if (sessionId && sessions.has(sessionId)) {
+      if (sessionId && mcpSessions.has(sessionId)) {
         const webResponse = await runWithToken(userToken, () =>
-          sessions.get(sessionId)!.handleRequest(webRequest),
+          mcpSessions.get(sessionId)!.handleRequest(webRequest),
         );
-        return convertWebResponse(webResponse);
+        return streamWebResponse(webResponse);
       }
       return jsonResponse({ error: "invalid_session" }, 400);
     }
@@ -254,19 +275,21 @@ app.http("mcp", {
 });
 
 /**
- * Convert a Web Standard Response to Azure Functions HttpResponseInit.
+ * Convert a Web Standard Response to Azure Functions HttpResponseInit,
+ * preserving the ReadableStream body for proper SSE streaming.
+ *
+ * Azure Functions v4 HttpResponseInit.body accepts ReadableStream natively —
+ * the runtime streams chunks to the client without buffering.
  */
-async function convertWebResponse(webResponse: Response): Promise<HttpResponseInit> {
+function streamWebResponse(webResponse: Response): HttpResponseInit {
   const headers: Record<string, string> = {};
   webResponse.headers.forEach((value, key) => {
     headers[key] = value;
   });
 
-  const body = await webResponse.text().catch(() => "");
-
   return {
     status: webResponse.status,
     headers,
-    body: body || undefined,
+    body: webResponse.body ?? undefined,
   };
 }
