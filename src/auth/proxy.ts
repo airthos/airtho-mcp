@@ -304,10 +304,24 @@ export async function handleToken(request: HttpRequest): Promise<HttpResponseIni
       };
     }
 
+    // Return a clean OAuth 2.0 token response — strip Entra-specific fields
+    // that Claude may not expect (ext_expires_in, id_token, etc.)
+    const cleanResponse: Record<string, unknown> = {
+      access_token: entraResult.access_token,
+      token_type: entraResult.token_type ?? "Bearer",
+      expires_in: entraResult.expires_in,
+      scope: entraResult.scope,
+    };
+    if (entraResult.refresh_token) {
+      cleanResponse.refresh_token = entraResult.refresh_token;
+    }
+
+    console.log("[OAuth Proxy] Returning clean token response with keys:", Object.keys(cleanResponse).join(", "));
+
     return {
       status: 200,
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(entraResult),
+      body: JSON.stringify(cleanResponse),
     };
   }
 

@@ -30,10 +30,11 @@ function getJwksClient(): jwksRsa.JwksClient {
     if (!tenantId) throw new Error("TENANT_ID is required for JWT validation");
 
     _jwksClient = jwksRsa({
-      jwksUri: `https://login.microsoftonline.com/${tenantId}/discovery/keys`,
+      jwksUri: `https://login.microsoftonline.com/${tenantId}/discovery/v2.0/keys`,
       cache: true,
-      cacheMaxAge: 600_000, // 10 minutes
+      cacheMaxAge: 300_000, // 5 minutes
       rateLimit: true,
+      jwksRequestsPerMinute: 10,
     });
   }
   return _jwksClient;
@@ -82,7 +83,13 @@ export async function validateToken(token: string): Promise<UserClaims | null> {
       scp: verified.scp as string | undefined,
     };
   } catch (err) {
-    console.log("[JWT] Validation error:", (err as Error).message);
+    const e = err as Error;
+    console.log("[JWT] Validation error:", e.message);
+    // Log additional detail for key-not-found errors
+    if (e.message.includes("key") || e.message.includes("kid")) {
+      const decoded = jwt.decode(token, { complete: true });
+      console.log("[JWT] Token kid:", decoded && typeof decoded !== "string" ? decoded.header.kid : "unknown");
+    }
     return null;
   }
 }
