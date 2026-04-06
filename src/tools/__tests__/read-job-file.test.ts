@@ -53,7 +53,7 @@ describe("readJobFile", () => {
     const result = await readJobFile({ job_keyword: "factorial", file_keyword: "RFP" });
     expect(result).toEqual(MOCK_READ_RESULT);
     // Verify read was called with internal item_id (not exposed in result)
-    expect(mockRead).toHaveBeenCalledWith({ drive_name: "Jobs", item_id: "id-rfp" });
+    expect(mockRead).toHaveBeenCalledWith({ drive_name: "Jobs", item_id: "id-rfp", userToken: undefined });
   });
 
   it("does not expose any item_id in the final response", async () => {

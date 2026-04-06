@@ -65,7 +65,7 @@ describe("listVendors", () => {
   it("uses Vendors drive (not Jobs)", async () => {
     setupGraphMock();
     await listVendors({});
-    expect(mockResolveDrive).toHaveBeenCalledWith("Vendors");
+    expect(mockResolveDrive).toHaveBeenCalledWith("Vendors", undefined);
   });
 
   it("returns error when resolveDrive fails", async () => {
