@@ -25,15 +25,16 @@ export async function search(args: {
   drive_name?: string;
   folder_path?: string;
   limit?: number;
+  userToken?: string;
 }): Promise<SearchResponse | McpError> {
-  const { query, drive_name = "Jobs", folder_path, limit = 50 } = args;
+  const { query, drive_name = "Jobs", folder_path, limit = 50, userToken } = args;
 
   // Resolve drive
-  const resolved = await resolveDrive(drive_name);
+  const resolved = await resolveDrive(drive_name, userToken);
   if ("error" in resolved) return resolved;
   const { driveId, driveName } = resolved;
 
-  const client = getGraphClient();
+  const client = getGraphClient(userToken);
 
   try {
     // Determine scope — either a specific folder or the drive root

@@ -27,13 +27,14 @@ interface GetJobResult {
 
 export async function getJob(args: {
   keyword: string;
+  userToken?: string;
 }): Promise<GetJobResult | McpError> {
-  const { keyword } = args;
+  const { keyword, userToken } = args;
 
-  const job = await resolveJob(keyword);
+  const job = await resolveJob(keyword, userToken);
   if ("error" in job) return job;
 
-  const client = getGraphClient();
+  const client = getGraphClient(userToken);
 
   try {
     const response = await client

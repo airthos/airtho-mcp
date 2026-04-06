@@ -63,8 +63,9 @@ export async function getListItems(args: {
   filter_value?: string;
   limit?: number;
   site_name?: string;
+  userToken?: string;
 }): Promise<GetListItemsResult | McpError> {
-  const { list_name, columns, filter_field, filter_value, limit = 50, site_name } = args;
+  const { list_name, columns, filter_field, filter_value, limit = 50, site_name, userToken } = args;
 
   // Validate column names — only allow alphanumeric, underscore, and space
   const SAFE_FIELD = /^[\w ]+$/;
@@ -79,11 +80,11 @@ export async function getListItems(args: {
   if ("error" in resolvedSite) return resolvedSite;
   const { siteId, siteName } = resolvedSite;
 
-  const resolvedList = await resolveList(siteId, list_name);
+  const resolvedList = await resolveList(siteId, list_name, userToken);
   if ("error" in resolvedList) return resolvedList;
   const { _listId, listDisplayName } = resolvedList;
 
-  const client = getGraphClient();
+  const client = getGraphClient(userToken);
 
   try {
     const cap = Math.min(Math.max(limit, 1), 200);

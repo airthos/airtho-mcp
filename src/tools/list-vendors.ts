@@ -23,14 +23,15 @@ interface ListVendorsResult {
 export async function listVendors(args: {
   keyword?: string;
   limit?: number;
+  userToken?: string;
 }): Promise<ListVendorsResult | McpError> {
-  const { keyword, limit = 50 } = args;
+  const { keyword, limit = 50, userToken } = args;
 
-  const resolved = await resolveDrive("Vendors");
+  const resolved = await resolveDrive("Vendors", userToken);
   if ("error" in resolved) return resolved;
   const { driveId } = resolved;
 
-  const client = getGraphClient();
+  const client = getGraphClient(userToken);
 
   try {
     const response = await client

@@ -28,13 +28,14 @@ export async function findInJob(args: {
   job_keyword: string;
   file_keyword: string;
   limit?: number;
+  userToken?: string;
 }): Promise<FindInJobResult | McpError> {
-  const { job_keyword, file_keyword, limit = 20 } = args;
+  const { job_keyword, file_keyword, limit = 20, userToken } = args;
 
-  const job = await resolveJob(job_keyword);
+  const job = await resolveJob(job_keyword, userToken);
   if ("error" in job) return job;
 
-  const client = getGraphClient();
+  const client = getGraphClient(userToken);
 
   try {
     // Try Graph search scoped to the job folder first

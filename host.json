@@ -15,11 +15,6 @@
   "extensions": {
     "http": {
       "routePrefix": ""
-    },
-    "mcp": {
-      "serverName": "airtho-mcp-server",
-      "serverVersion": "1.0.0",
-      "instructions": "Airtho SharePoint connector (read-only). Tools cover two domains: (1) Document libraries — job files, quotes, vendors, and other drives. Prefer the job-specific tools for job lookups; use browse/search/read for non-job drives or deep navigation. (2) SharePoint lists — structured data like RFI logs, submittals, change orders. Call list_lists first to discover available lists and column field_names. All tools accept human-readable names — no IDs needed."
     }
   }
 }

@@ -20,14 +20,15 @@ interface SearchJobsResult {
 export async function searchJobs(args: {
   keyword?: string;
   limit?: number;
+  userToken?: string;
 }): Promise<SearchJobsResult | McpError> {
-  const { keyword, limit = 50 } = args;
+  const { keyword, limit = 50, userToken } = args;
 
-  const resolved = await resolveDrive("Jobs");
+  const resolved = await resolveDrive("Jobs", userToken);
   if ("error" in resolved) return resolved;
   const { driveId } = resolved;
 
-  const client = getGraphClient();
+  const client = getGraphClient(userToken);
 
   try {
     const response = await client

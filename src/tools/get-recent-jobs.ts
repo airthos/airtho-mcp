@@ -22,14 +22,15 @@ interface GetRecentJobsResult {
 
 export async function getRecentJobs(args: {
   limit?: number;
+  userToken?: string;
 }): Promise<GetRecentJobsResult | McpError> {
-  const { limit = 10 } = args;
+  const { limit = 10, userToken } = args;
 
-  const resolved = await resolveDrive("Jobs");
+  const resolved = await resolveDrive("Jobs", userToken);
   if ("error" in resolved) return resolved;
   const { driveId } = resolved;
 
-  const client = getGraphClient();
+  const client = getGraphClient(userToken);
 
   try {
     const response = await client

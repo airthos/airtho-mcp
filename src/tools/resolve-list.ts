@@ -30,10 +30,10 @@ export function _resetListCache(): void {
   _listCache.clear();
 }
 
-async function loadLists(siteId: string): Promise<ListEntry[]> {
+async function loadLists(siteId: string, userToken?: string): Promise<ListEntry[]> {
   if (_listCache.has(siteId)) return _listCache.get(siteId)!;
 
-  const client = getGraphClient();
+  const client = getGraphClient(userToken);
   const response = (await client
     .api(`/sites/${siteId}/lists?$select=id,name,displayName,list`)
     .get()) as { value: GraphList[] };
@@ -58,10 +58,11 @@ async function loadLists(siteId: string): Promise<ListEntry[]> {
  */
 export async function resolveList(
   siteId: string,
-  listName: string
+  listName: string,
+  userToken?: string,
 ): Promise<ResolvedList | McpError> {
   try {
-    const lists = await loadLists(siteId);
+    const lists = await loadLists(siteId, userToken);
     const key = listName.toLowerCase();
     const dataLists = lists.filter((l) => l.isDataList);
     const match =

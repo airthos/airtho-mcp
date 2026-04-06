@@ -1,6 +1,10 @@
 import { ClientSecretCredential } from "@azure/identity";
 import { Client } from "@microsoft/microsoft-graph-client";
 import { TokenCredentialAuthenticationProvider } from "@microsoft/microsoft-graph-client/authProviders/azureTokenCredentials/index.js";
+import {
+  getGraphClientForUser as oboGraphClient,
+  getBearerTokenForUser as oboBearerToken,
+} from "../auth/obo.js";
 
 let _credential: ClientSecretCredential | null = null;
 let _client: Client | null = null;
@@ -22,7 +26,16 @@ function getCredential(): ClientSecretCredential {
   return _credential;
 }
 
-export function getGraphClient(): Client {
+/**
+ * Get a Graph client — per-user (OBO) if a token is provided,
+ * otherwise falls back to the shared service account (local dev).
+ */
+export function getGraphClient(userToken?: string): Client {
+  if (userToken) {
+    return oboGraphClient(userToken);
+  }
+
+  // Fallback: service account singleton (client credentials)
   if (!_client) {
     const authProvider = new TokenCredentialAuthenticationProvider(
       getCredential(),
@@ -33,8 +46,15 @@ export function getGraphClient(): Client {
   return _client;
 }
 
-/** Returns a bearer token for direct fetch() calls (e.g. file content download). */
-export async function getBearerToken(): Promise<string> {
+/**
+ * Returns a bearer token for direct fetch() calls (e.g. file content download).
+ * Per-user (OBO) if a token is provided, otherwise service account.
+ */
+export async function getBearerToken(userToken?: string): Promise<string> {
+  if (userToken) {
+    return oboBearerToken(userToken);
+  }
+
   const token = await getCredential().getToken(
     "https://graph.microsoft.com/.default"
   );

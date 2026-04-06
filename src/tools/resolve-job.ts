@@ -28,12 +28,12 @@ export interface ResolvedJob {
  * Resolve a keyword to the best-matching job folder.
  * Returns McpError if no match found or on Graph failure.
  */
-export async function resolveJob(keyword: string): Promise<ResolvedJob | McpError> {
-  const resolved = await resolveDrive("Jobs");
+export async function resolveJob(keyword: string, userToken?: string): Promise<ResolvedJob | McpError> {
+  const resolved = await resolveDrive("Jobs", userToken);
   if ("error" in resolved) return resolved;
   const { driveId } = resolved;
 
-  const client = getGraphClient();
+  const client = getGraphClient(userToken);
 
   try {
     const response = await client

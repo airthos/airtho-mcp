@@ -74,12 +74,13 @@ function mapColumn(col: GraphListColumn): ListColumnInfo | null {
 
 export async function listLists(args: {
   site_name?: string;
+  userToken?: string;
 }): Promise<ListListsResult | McpError> {
   const resolved = resolveSite(args.site_name);
   if ("error" in resolved) return resolved;
   const { siteId, siteName } = resolved;
 
-  const client = getGraphClient();
+  const client = getGraphClient(args.userToken);
 
   try {
     const response = (await client

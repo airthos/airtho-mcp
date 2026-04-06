@@ -113,19 +113,20 @@ export async function read(args: {
   drive_name: string;
   path?: string;
   item_id?: string;
+  userToken?: string;
 }): Promise<ReadResult | ReadUnsupported | McpError> {
-  const { drive_name, path, item_id } = args;
+  const { drive_name, path, item_id, userToken } = args;
 
   if (!path && !item_id) {
     return { error: "invalid_input", message: "Provide either 'path' or 'item_id'" };
   }
 
   // Resolve drive
-  const resolved = await resolveDrive(drive_name);
+  const resolved = await resolveDrive(drive_name, userToken);
   if ("error" in resolved) return resolved;
   const { driveId, driveName } = resolved;
 
-  const client = getGraphClient();
+  const client = getGraphClient(userToken);
 
   try {
     // Get the file item — either by path or item_id

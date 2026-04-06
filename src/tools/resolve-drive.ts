@@ -4,10 +4,10 @@ import type { GraphDrive, McpError } from "../types.js";
 /** Cached drive list per cold-start (drives don't change often). */
 let _driveCache: { id: string; name: string; nameLower: string }[] | null = null;
 
-async function loadDrives(siteId: string): Promise<{ id: string; name: string; nameLower: string }[]> {
+async function loadDrives(siteId: string, userToken?: string): Promise<{ id: string; name: string; nameLower: string }[]> {
   if (_driveCache) return _driveCache;
 
-  const client = getGraphClient();
+  const client = getGraphClient(userToken);
   const response = await client.api(`/sites/${siteId}/drives`).get() as { value: GraphDrive[] };
   _driveCache = (response.value ?? []).map((d) => ({
     id: d.id,
@@ -26,14 +26,14 @@ export interface ResolvedDrive {
  * Resolve a human-readable drive name to a Graph drive ID.
  * Case-insensitive match. Returns an McpError if not found.
  */
-export async function resolveDrive(driveName: string): Promise<ResolvedDrive | McpError> {
+export async function resolveDrive(driveName: string, userToken?: string): Promise<ResolvedDrive | McpError> {
   const siteId = process.env.DEFAULT_SITE_ID;
   if (!siteId) {
     return { error: "missing_site_id", message: "DEFAULT_SITE_ID is not configured on the server" };
   }
 
   try {
-    const drives = await loadDrives(siteId);
+    const drives = await loadDrives(siteId, userToken);
     const target = driveName.toLowerCase();
     const match = drives.find((d) => d.nameLower === target);
     if (!match) {
@@ -51,14 +51,14 @@ export async function resolveDrive(driveName: string): Promise<ResolvedDrive | M
 }
 
 /** List all available drives (for when no drive_name is provided). */
-export async function listAllDrives(): Promise<{ name: string; description: string }[] | McpError> {
+export async function listAllDrives(userToken?: string): Promise<{ name: string; description: string }[] | McpError> {
   const siteId = process.env.DEFAULT_SITE_ID;
   if (!siteId) {
     return { error: "missing_site_id", message: "DEFAULT_SITE_ID is not configured on the server" };
   }
 
   try {
-    const drives = await loadDrives(siteId);
+    const drives = await loadDrives(siteId, userToken);
     return drives.map((d) => ({ name: d.name, description: "document library" }));
   } catch (err: unknown) {
     const e = err as { message?: string };

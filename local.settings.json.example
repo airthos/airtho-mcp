@@ -6,6 +6,8 @@
     "TENANT_ID": "your-aad-tenant-id",
     "CLIENT_ID": "your-app-registration-client-id",
     "CLIENT_SECRET": "your-client-secret",
-    "DEFAULT_SITE_ID": "your-sharepoint-site-id"
+    "DEFAULT_SITE_ID": "your-sharepoint-site-id",
+    "REQUIRE_AUTH": "false",
+    "MCP_RESOURCE_URI": "http://localhost:7071"
   }
 }

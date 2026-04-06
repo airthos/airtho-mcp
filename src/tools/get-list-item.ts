@@ -21,8 +21,9 @@ export async function getListItem(args: {
   item_id: number;
   columns?: string[];
   site_name?: string;
+  userToken?: string;
 }): Promise<GetListItemResult | McpError> {
-  const { list_name, item_id, columns, site_name } = args;
+  const { list_name, item_id, columns, site_name, userToken } = args;
 
   // Validate item_id is a positive integer
   if (!Number.isInteger(item_id) || item_id < 1) {
@@ -39,11 +40,11 @@ export async function getListItem(args: {
   if ("error" in resolvedSite) return resolvedSite;
   const { siteId } = resolvedSite;
 
-  const resolvedList = await resolveList(siteId, list_name);
+  const resolvedList = await resolveList(siteId, list_name, userToken);
   if ("error" in resolvedList) return resolvedList;
   const { _listId, listDisplayName } = resolvedList;
 
-  const client = getGraphClient();
+  const client = getGraphClient(userToken);
 
   try {
     const expandParam =

@@ -27,22 +27,23 @@ export async function browse(args: {
   item_id?: string;
   limit?: number;
   offset?: number;
+  userToken?: string;
 }): Promise<BrowseResult | { drives: { name: string; description: string }[] } | McpError> {
-  const { drive_name, path, item_id, limit = 50, offset = 0 } = args;
+  const { drive_name, path, item_id, limit = 50, offset = 0, userToken } = args;
 
   // No drive_name → list all drives
   if (!drive_name) {
-    const drives = await listAllDrives();
+    const drives = await listAllDrives(userToken);
     if ("error" in drives) return drives;
     return { drives };
   }
 
   // Resolve drive name to ID
-  const resolved = await resolveDrive(drive_name);
+  const resolved = await resolveDrive(drive_name, userToken);
   if ("error" in resolved) return resolved;
   const { driveId, driveName } = resolved;
 
-  const client = getGraphClient();
+  const client = getGraphClient(userToken);
 
   try {
     // Determine what to fetch

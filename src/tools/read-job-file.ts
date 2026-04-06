@@ -13,13 +13,14 @@ import { read } from "./read.js";
 export async function readJobFile(args: {
   job_keyword: string;
   file_keyword: string;
+  userToken?: string;
 }): Promise<unknown | McpError> {
-  const { job_keyword, file_keyword } = args;
+  const { job_keyword, file_keyword, userToken } = args;
 
-  const job = await resolveJob(job_keyword);
+  const job = await resolveJob(job_keyword, userToken);
   if ("error" in job) return job;
 
-  const client = getGraphClient();
+  const client = getGraphClient(userToken);
 
   try {
     // Search within the job folder for the file — fetch a few candidates
@@ -46,7 +47,7 @@ export async function readJobFile(args: {
     const best = files[0];
 
     // Read using item_id internally — never exposed in the response
-    const content = await read({ drive_name: "Jobs", item_id: best.id });
+    const content = await read({ drive_name: "Jobs", item_id: best.id, userToken });
 
     return content;
   } catch (err: unknown) {

@@ -38,18 +38,19 @@ export async function searchList(args: {
   keyword: string;
   limit?: number;
   site_name?: string;
+  userToken?: string;
 }): Promise<SearchListResult | McpError> {
-  const { list_name, keyword, limit = 20, site_name } = args;
+  const { list_name, keyword, limit = 20, site_name, userToken } = args;
 
   const resolvedSite = resolveSite(site_name);
   if ("error" in resolvedSite) return resolvedSite;
   const { siteId, siteName: _siteName } = resolvedSite;
 
-  const resolvedList = await resolveList(siteId, list_name);
+  const resolvedList = await resolveList(siteId, list_name, userToken);
   if ("error" in resolvedList) return resolvedList;
   const { _listId, listDisplayName } = resolvedList;
 
-  const client = getGraphClient();
+  const client = getGraphClient(userToken);
 
   try {
     // Fetch one full page — $search unsupported, client-side match required
