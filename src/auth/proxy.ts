@@ -96,6 +96,9 @@ export async function handleRegister(request: HttpRequest): Promise<HttpResponse
     };
   }
 
+  // Log what Claude sends for debugging
+  console.log("[OAuth Proxy] DCR register request:", JSON.stringify(body));
+
   // Accept whatever Claude sends, return our pre-registered Entra client_id
   const clientId = process.env.CLIENT_ID!;
   const redirectUris = (body.redirect_uris as string[]) ?? [];
@@ -126,6 +129,7 @@ export async function handleRegister(request: HttpRequest): Promise<HttpResponse
 // ── Authorization Endpoint ────────────────────────────────────────────────────
 
 export function handleAuthorize(request: HttpRequest): HttpResponseInit {
+  console.log("[OAuth Proxy] Authorize request:", request.url);
   const url = new URL(request.url);
   const clientRedirectUri = url.searchParams.get("redirect_uri") ?? "";
   const codeChallenge = url.searchParams.get("code_challenge") ?? undefined;
@@ -177,6 +181,7 @@ export function handleAuthorize(request: HttpRequest): HttpResponseInit {
 // ── Callback (from Entra ID after user login) ─────────────────────────────────
 
 export function handleCallback(request: HttpRequest): HttpResponseInit {
+  console.log("[OAuth Proxy] Callback request:", request.url);
   const url = new URL(request.url);
   const entraCode = url.searchParams.get("code");
   const proxyState = url.searchParams.get("state");
@@ -227,6 +232,7 @@ export async function handleToken(request: HttpRequest): Promise<HttpResponseIni
   let params: URLSearchParams;
   try {
     const text = await request.text();
+    console.log("[OAuth Proxy] Token request body:", text);
     params = new URLSearchParams(text);
   } catch {
     return {
@@ -281,6 +287,7 @@ export async function handleToken(request: HttpRequest): Promise<HttpResponseIni
     });
 
     const entraResult = await entraResponse.json() as Record<string, unknown>;
+    console.log("[OAuth Proxy] Entra token response:", entraResponse.status, JSON.stringify(entraResult));
 
     if (!entraResponse.ok) {
       return {
