@@ -40,15 +40,21 @@ if (missing.length > 0) {
 }
 
 const REQUIRE_AUTH = process.env.REQUIRE_AUTH !== "false";
+const MCP_ROUTE = "mcp";
 
 // ── MCP session management ────────────────────────────────────────────────────
 const mcpSessions = new Map<string, WebStandardStreamableHTTPServerTransport>();
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function getResourceUrl(request: HttpRequest): string {
+function getBaseUrl(request: HttpRequest): string {
   return process.env.MCP_RESOURCE_URI
     ?? `${request.headers.get("x-forwarded-proto") || "https"}://${request.headers.get("host")}`;
+}
+
+function getMcpResourceUrl(request: HttpRequest): string {
+  const baseUrl = getBaseUrl(request).replace(/\/$/, "");
+  return `${baseUrl}/${MCP_ROUTE}`;
 }
 
 function jsonResponse(body: unknown, status = 200, headers?: Record<string, string>): HttpResponseInit {
@@ -75,12 +81,12 @@ async function authenticate(request: HttpRequest): Promise<string | null | HttpR
 
   if (!raw && REQUIRE_AUTH) {
     console.log("[Auth] No token, returning 401");
-    const resourceUrl = getResourceUrl(request);
+    const baseUrl = getBaseUrl(request);
     return {
       status: 401,
       headers: {
         "content-type": "application/json",
-        "www-authenticate": `Bearer realm="mcp", resource_metadata="${resourceUrl}/.well-known/oauth-protected-resource"`,
+        "www-authenticate": `Bearer realm="mcp", resource_metadata="${baseUrl}/.well-known/oauth-protected-resource/${MCP_ROUTE}"`,
       },
       body: JSON.stringify({ error: "unauthorized", message: "Bearer token required" }),
     };
@@ -120,7 +126,16 @@ app.http("wellKnown", {
   route: ".well-known/oauth-protected-resource",
   authLevel: "anonymous",
   handler: async (request: HttpRequest): Promise<HttpResponseInit> => {
-    return jsonResponse(buildProtectedResourceMetadata(getResourceUrl(request)));
+    return jsonResponse(buildProtectedResourceMetadata(getMcpResourceUrl(request), getBaseUrl(request)));
+  },
+});
+
+app.http("wellKnownMcp", {
+  methods: ["GET"],
+  route: ".well-known/oauth-protected-resource/mcp",
+  authLevel: "anonymous",
+  handler: async (request: HttpRequest): Promise<HttpResponseInit> => {
+    return jsonResponse(buildProtectedResourceMetadata(getMcpResourceUrl(request), getBaseUrl(request)));
   },
 });
 
@@ -129,6 +144,15 @@ app.http("wellKnown", {
 app.http("authServerMetadata", {
   methods: ["GET"],
   route: ".well-known/oauth-authorization-server",
+  authLevel: "anonymous",
+  handler: async (request: HttpRequest): Promise<HttpResponseInit> => {
+    return handleAuthServerMetadata(request);
+  },
+});
+
+app.http("authServerMetadataMcp", {
+  methods: ["GET"],
+  route: ".well-known/oauth-authorization-server/mcp",
   authLevel: "anonymous",
   handler: async (request: HttpRequest): Promise<HttpResponseInit> => {
     return handleAuthServerMetadata(request);
@@ -177,7 +201,7 @@ app.http("oauthToken", {
 
 app.http("mcp", {
   methods: ["GET", "POST", "DELETE"],
-  route: "mcp",
+  route: MCP_ROUTE,
   authLevel: "anonymous",
   handler: async (request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> => {
     // ── Auth ──────────────────────────────────────────────────────────────

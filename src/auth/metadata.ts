@@ -18,13 +18,18 @@ export interface ProtectedResourceMetadata {
 /**
  * Build the protected resource metadata document.
  *
- * @param resourceUrl - The public URL of this MCP server,
- *                      e.g. "https://airtho-mcp.azurewebsites.net"
+ * @param resourceUrl - Canonical MCP resource URI,
+ *                      e.g. "https://airtho-mcp.azurewebsites.net/mcp"
+ * @param authorizationServerUrl - Issuer/base URL for this server's OAuth endpoints,
+ *                                 e.g. "https://airtho-mcp.azurewebsites.net"
  */
-export function buildProtectedResourceMetadata(resourceUrl: string): ProtectedResourceMetadata {
+export function buildProtectedResourceMetadata(
+  resourceUrl: string,
+  authorizationServerUrl: string,
+): ProtectedResourceMetadata {
   return {
     resource: resourceUrl,
-    authorization_servers: [resourceUrl],
+    authorization_servers: [authorizationServerUrl],
     bearer_methods_supported: ["header"],
     scopes_supported: [
       `api://${process.env.CLIENT_ID!}/mcp.access`,

@@ -28,6 +28,7 @@ import { createSession } from "./sessions.js";
 const pendingCodes = new Map<string, {
   entraCode: string;
   redirectUri: string;
+  resource: string;
   codeVerifier?: string;
   expiresAt: number;
 }>();
@@ -35,6 +36,7 @@ const pendingCodes = new Map<string, {
 /** Maps state → { clientRedirectUri, codeChallenge, codeChallengeMethod } for the authorize flow. */
 const pendingAuthorizations = new Map<string, {
   clientRedirectUri: string;
+  resource: string;
   codeChallenge?: string;
   codeChallengeMethod?: string;
   clientState?: string;
@@ -63,6 +65,10 @@ function entraTokenUrl(): string {
   return `https://login.microsoftonline.com/${process.env.TENANT_ID!}/oauth2/v2.0/token`;
 }
 
+function canonicalResourceUrl(request: HttpRequest): string {
+  return `${getBaseUrl(request).replace(/\/$/, "")}/mcp`;
+}
+
 // ── RFC 8414 — Authorization Server Metadata ──────────────────────────────────
 
 export function handleAuthServerMetadata(request: HttpRequest): HttpResponseInit {
@@ -79,6 +85,7 @@ export function handleAuthServerMetadata(request: HttpRequest): HttpResponseInit
       grant_types_supported: ["authorization_code", "refresh_token"],
       code_challenge_methods_supported: ["S256", "plain"],
       token_endpoint_auth_methods_supported: ["client_secret_post", "none"],
+      resource_parameter_supported: true,
       scopes_supported: ["openid", "profile", "email", "offline_access"],
     }),
   };
@@ -141,6 +148,7 @@ export function handleAuthorize(request: HttpRequest): HttpResponseInit {
   console.log("[OAuth Proxy] Authorize request:", request.url);
   const url = new URL(request.url);
   const clientRedirectUri = url.searchParams.get("redirect_uri") ?? "";
+  const resource = url.searchParams.get("resource") ?? canonicalResourceUrl(request);
   const codeChallenge = url.searchParams.get("code_challenge") ?? undefined;
   const codeChallengeMethod = url.searchParams.get("code_challenge_method") ?? undefined;
   const clientState = url.searchParams.get("state") ?? undefined;
@@ -150,6 +158,7 @@ export function handleAuthorize(request: HttpRequest): HttpResponseInit {
   const proxyState = randomUUID();
   pendingAuthorizations.set(proxyState, {
     clientRedirectUri,
+    resource,
     codeChallenge,
     codeChallengeMethod,
     clientState,
@@ -222,6 +231,7 @@ export function handleCallback(request: HttpRequest): HttpResponseInit {
   pendingCodes.set(proxyCode, {
     entraCode,
     redirectUri: pending.clientRedirectUri,
+    resource: pending.resource,
     expiresAt: Date.now() + 600_000, // 10 minutes
   });
 
@@ -256,6 +266,7 @@ export async function handleToken(request: HttpRequest): Promise<HttpResponseIni
 
   if (grantType === "authorization_code") {
     const proxyCode = params.get("code");
+    const resource = params.get("resource");
     const codeVerifier = params.get("code_verifier") ?? undefined;
 
     if (!proxyCode || !pendingCodes.has(proxyCode)) {
@@ -274,6 +285,14 @@ export async function handleToken(request: HttpRequest): Promise<HttpResponseIni
         status: 400,
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ error: "invalid_grant", error_description: "Authorization code expired" }),
+      };
+    }
+
+    if (resource && resource !== pending.resource) {
+      return {
+        status: 400,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ error: "invalid_target", error_description: "Requested resource does not match authorization" }),
       };
     }
 
