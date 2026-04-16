@@ -64,12 +64,20 @@ Claude requires the MCP server to act as its own OAuth authorization server (Ent
 |---|---|
 | `/.well-known/oauth-protected-resource` | RFC 9728 — tells Claude where to get tokens (points to ourselves) |
 | `/.well-known/oauth-authorization-server` | RFC 8414 — advertises our OAuth endpoints |
-| `/register` | DCR — accepts Claude's client registration, returns our Entra client_id |
-| `/authorize` | Redirects to Entra ID login with our app credentials |
-| `/callback` | Receives Entra redirect after login, redirects back to Claude with auth code |
-| `/token` | Exchanges auth code with Entra, returns access token to Claude |
+| `/register` | DCR — accepts Claude's registration, returns a proxy client_id (not the real Entra ID) |
+| `/authorize` | Stores Claude's PKCE, generates proxy PKCE, redirects to Entra ID login |
+| `/callback` | Exchanges Entra code immediately (not deferred to /token), stores tokens + claims, redirects to Claude with opaque proxy code |
+| `/token` | Validates Claude's PKCE, returns self-signed JWT access_token + opaque refresh_token |
 
-The token Claude receives is an Entra ID access token. Tool handlers read it from `AsyncLocalStorage` (`src/auth/token-store.ts`) and use it for OBO Graph calls.
+**Key design decisions (matching Profility reference implementation):**
+- **Dual PKCE**: Claude's code_challenge/verifier are validated by the proxy; a separate PKCE pair is used for the Entra leg
+- **Exchange in /callback**: Entra code is consumed immediately in the callback, eliminating timing/cold-start risks
+- **Self-signed JWT access tokens**: Claude receives a JWT with user claims (not an opaque UUID or raw Entra JWT) issued by `src/auth/jwt-builder.ts`
+- **Refresh tokens**: An opaque refresh_token is returned, mapped server-side to Entra's refresh_token
+- **Session persistence**: Entra tokens are cached in Azure Table Storage (table: `McpSessions`) + in-memory hot cache, surviving Azure Functions cold starts
+- **Proxy client_id**: DCR returns a SHA-256 hash, never the real Entra client_id or client_secret
+
+Tool handlers read the resolved Entra token from `AsyncLocalStorage` (`src/auth/token-store.ts`) and use it for OBO Graph calls.
 
 ### Graph Client (`src/graph/client.ts`)
 

@@ -13,26 +13,26 @@ export interface ProtectedResourceMetadata {
   authorization_servers: string[];
   bearer_methods_supported: string[];
   scopes_supported: string[];
+  resource_documentation?: string;
 }
 
 /**
  * Build the protected resource metadata document.
  *
- * @param resourceUrl - Canonical MCP resource URI,
- *                      e.g. "https://airtho-mcp.azurewebsites.net/mcp"
- * @param authorizationServerUrl - Issuer/base URL for this server's OAuth endpoints,
- *                                 e.g. "https://airtho-mcp.azurewebsites.net"
+ * @param baseUrl - Server base URL, e.g. "https://airtho-mcp.azurewebsites.net"
+ *                  Used as both the `resource` identifier and the authorization server.
+ *                  (Profility uses base URL, not the /mcp path, for the resource field.)
  */
-export function buildProtectedResourceMetadata(
-  resourceUrl: string,
-  authorizationServerUrl: string,
-): ProtectedResourceMetadata {
+export function buildProtectedResourceMetadata(baseUrl: string): ProtectedResourceMetadata {
   return {
-    resource: resourceUrl,
-    authorization_servers: [authorizationServerUrl],
+    resource: baseUrl,
+    authorization_servers: [baseUrl],
     bearer_methods_supported: ["header"],
     scopes_supported: [
       `api://${process.env.CLIENT_ID!}/mcp.access`,
+      "openid",
+      "profile",
+      "email",
     ],
   };
 }

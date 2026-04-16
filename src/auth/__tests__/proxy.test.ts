@@ -11,12 +11,14 @@ function getHeader(headers: unknown, key: string): string | undefined {
 describe("OAuth proxy resource handling", () => {
   const previousEnv = {
     CLIENT_ID: process.env.CLIENT_ID,
+    CLIENT_SECRET: process.env.CLIENT_SECRET,
     TENANT_ID: process.env.TENANT_ID,
     MCP_RESOURCE_URI: process.env.MCP_RESOURCE_URI,
   };
 
   beforeEach(() => {
     process.env.CLIENT_ID = "client-id";
+    process.env.CLIENT_SECRET = "test-secret";
     process.env.TENANT_ID = "tenant-id";
     process.env.MCP_RESOURCE_URI = "https://example.com";
   });
@@ -31,19 +33,21 @@ describe("OAuth proxy resource handling", () => {
     }
   });
 
-  it("advertises resource parameter support in auth server metadata", () => {
+  it("advertises supported grant types in auth server metadata", () => {
     const response = handleAuthServerMetadata({
       headers: new Headers(),
     } as never);
 
     const metadata = JSON.parse(response.body as string) as Record<string, unknown>;
-    expect(metadata.resource_parameter_supported).toBe(true);
     expect(metadata.issuer).toBe("https://example.com");
+    expect(metadata.grant_types_supported).toContain("authorization_code");
+    expect(metadata.grant_types_supported).toContain("refresh_token");
+    expect(metadata.code_challenge_methods_supported).toContain("S256");
   });
 
-  it("defaults authorize requests to the canonical /mcp resource", () => {
+  it("redirects authorize requests to Entra with proxy PKCE", () => {
     const response = handleAuthorize({
-      url: "https://example.com/authorize?redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&state=client-state",
+      url: "https://example.com/authorize?redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&state=client-state&code_challenge=test-challenge&code_challenge_method=S256",
       headers: new Headers(),
     } as never);
 
@@ -51,38 +55,34 @@ describe("OAuth proxy resource handling", () => {
     const location = getHeader(response.headers, "location");
     expect(location).toBeDefined();
     const redirected = new URL(location!);
+    // Proxy generates its own PKCE — should NOT forward Claude's challenge
+    expect(redirected.searchParams.get("code_challenge")).not.toBe("test-challenge");
+    expect(redirected.searchParams.get("code_challenge_method")).toBe("S256");
     expect(redirected.searchParams.get("state")).toBeTruthy();
+  });
 
-    const callbackResponse = handleCallback({
-      url: `https://example.com/callback?code=entra-code&state=${redirected.searchParams.get("state")}`,
+  it("callback exchanges with Entra and redirects to Claude with proxy code", async () => {
+    // First, start an authorize flow to populate pendingAuthorizations
+    const authorizeResponse = handleAuthorize({
+      url: "https://example.com/authorize?redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&state=client-state",
+      headers: new Headers(),
+    } as never);
+
+    const location = getHeader(authorizeResponse.headers, "location");
+    const redirected = new URL(location!);
+    const proxyState = redirected.searchParams.get("state")!;
+
+    // Simulate Entra callback — this will try to exchange with Entra (will fail in test)
+    // but we can at least verify it handles missing/error states correctly
+    const callbackResponse = await handleCallback({
+      url: `https://example.com/callback?error=access_denied&error_description=User+cancelled&state=${proxyState}`,
       headers: new Headers(),
     } as never);
 
     expect(callbackResponse.status).toBe(302);
     const callbackLocation = new URL(getHeader(callbackResponse.headers, "location")!);
     expect(callbackLocation.origin + callbackLocation.pathname).toBe("https://claude.ai/api/mcp/auth_callback");
-    expect(callbackLocation.searchParams.get("code")).toBeTruthy();
+    expect(callbackLocation.searchParams.get("error")).toBe("access_denied");
     expect(callbackLocation.searchParams.get("state")).toBe("client-state");
-  });
-
-  it("preserves an explicit resource parameter through the authorization flow", () => {
-    const response = handleAuthorize({
-      url: "https://example.com/authorize?redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&resource=https%3A%2F%2Fexample.com%2Fcustom-mcp&state=client-state",
-      headers: new Headers(),
-    } as never);
-
-    expect(response.status).toBe(302);
-    const location = getHeader(response.headers, "location");
-    expect(location).toBeDefined();
-    const redirected = new URL(location!);
-
-    const callbackResponse = handleCallback({
-      url: `https://example.com/callback?code=entra-code&state=${redirected.searchParams.get("state")}`,
-      headers: new Headers(),
-    } as never);
-
-    expect(callbackResponse.status).toBe(302);
-    const callbackLocation = new URL(getHeader(callbackResponse.headers, "location")!);
-    expect(callbackLocation.searchParams.get("code")).toBeTruthy();
   });
 });

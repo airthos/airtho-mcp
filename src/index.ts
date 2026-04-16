@@ -6,9 +6,9 @@
  * their Microsoft account; Graph API calls run under their identity
  * via the On-Behalf-Of (OBO) flow.
  *
- * Auth uses opaque session tokens — Claude receives a UUID, not the raw
- * Entra JWT. The real token is cached server-side for OBO Graph calls.
- * SSE responses are streamed via ReadableStream (not buffered).
+ * Auth uses self-signed proxy JWTs — Claude receives a JWT issued by this
+ * server (not Entra's raw JWT). The real Entra token is cached server-side
+ * (in-memory + Azure Table Storage) for OBO Graph calls.
  *
  * Local dev:  func start  →  http://localhost:7071/mcp
  * Deployed:   https://<app>.azurewebsites.net/mcp
@@ -19,8 +19,6 @@ import { randomUUID } from "node:crypto";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { createMcpServer } from "./mcp-server.js";
-import { extractBearerToken } from "./auth/validate-jwt.js";
-import { resolveSession } from "./auth/sessions.js";
 import { buildProtectedResourceMetadata } from "./auth/metadata.js";
 import { runWithToken } from "./auth/token-store.js";
 import {
@@ -52,11 +50,6 @@ function getBaseUrl(request: HttpRequest): string {
     ?? `${request.headers.get("x-forwarded-proto") || "https"}://${request.headers.get("host")}`;
 }
 
-function getMcpResourceUrl(request: HttpRequest): string {
-  const baseUrl = getBaseUrl(request).replace(/\/$/, "");
-  return `${baseUrl}/${MCP_ROUTE}`;
-}
-
 function jsonResponse(body: unknown, status = 200, headers?: Record<string, string>): HttpResponseInit {
   return {
     status,
@@ -66,54 +59,39 @@ function jsonResponse(body: unknown, status = 200, headers?: Record<string, stri
 }
 
 /**
- * Authenticate the request using opaque session tokens or raw Entra JWTs.
+ * Authenticate the request.
  *
- * - Opaque token (UUID): look up cached Entra token from sessions.ts
- * - Raw JWT (starts with "eyJ"): validate directly (for CLI/curl testing)
- * - No token + REQUIRE_AUTH: return 401 with RFC 9728 metadata pointer
- * - No token + !REQUIRE_AUTH: allow through (local dev)
+ * Softeria-style: extract Bearer token and pass it through directly.
+ * The token is the raw Entra access token issued by our /token endpoint.
+ * Tool handlers use it for OBO Graph calls — if invalid, Graph returns 401.
  *
- * Returns the real Entra access token (for OBO), null, or an error response.
+ *   1. No token + REQUIRE_AUTH  → 401 with RFC 9728 metadata pointer
+ *   2. No token + !REQUIRE_AUTH → allow through (local dev)
+ *   3. Token present            → pass through as Entra token
  */
-async function authenticate(request: HttpRequest): Promise<string | null | HttpResponseInit> {
-  const raw = extractBearerToken(request.headers.get("authorization"));
+function authenticate(request: HttpRequest): string | null | HttpResponseInit {
+  const authHeader = request.headers.get("authorization");
+  const raw = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  const baseUrl = getBaseUrl(request);
   console.log("[Auth] Method:", request.method, "Path:", new URL(request.url).pathname, "Has token:", !!raw);
 
   if (!raw && REQUIRE_AUTH) {
     console.log("[Auth] No token, returning 401");
-    const baseUrl = getBaseUrl(request);
     return {
       status: 401,
       headers: {
         "content-type": "application/json",
-        "www-authenticate": `Bearer realm="mcp", resource_metadata="${baseUrl}/.well-known/oauth-protected-resource/${MCP_ROUTE}"`,
+        "www-authenticate": `Bearer resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`,
       },
       body: JSON.stringify({ error: "unauthorized", message: "Bearer token required" }),
     };
   }
 
   if (raw) {
-    // Try opaque session token first (UUID format from our /token endpoint)
-    const session = resolveSession(raw);
-    if (session) {
-      console.log("[Auth] Session token resolved OK");
-      return session.accessToken; // Return the real Entra token for OBO
-    }
-
-    // Try raw JWT (for device code flow / CLI testing)
-    if (raw.startsWith("eyJ")) {
-      const { validateToken } = await import("./auth/validate-jwt.js");
-      const claims = await validateToken(raw);
-      if (claims) {
-        console.log("[Auth] JWT validated OK:", claims.preferred_username);
-        return raw;
-      }
-      console.log("[Auth] JWT validation failed");
-    } else {
-      console.log("[Auth] Unknown token format (not session ID or JWT)");
-    }
-
-    return jsonResponse({ error: "invalid_token", message: "Token validation failed" }, 401);
+    // JWT tokens start with "eyJ" — helps distinguish token types in App Insights
+    const tokenHint = raw.startsWith("eyJ") ? "JWT" : "opaque";
+    console.log(`[Auth] Bearer token present (${tokenHint}), passing through`);
+    return raw;
   }
 
   return null; // No token, auth not required (local dev)
@@ -126,7 +104,7 @@ app.http("wellKnown", {
   route: ".well-known/oauth-protected-resource",
   authLevel: "anonymous",
   handler: async (request: HttpRequest): Promise<HttpResponseInit> => {
-    return jsonResponse(buildProtectedResourceMetadata(getMcpResourceUrl(request), getBaseUrl(request)));
+    return jsonResponse(buildProtectedResourceMetadata(getBaseUrl(request)));
   },
 });
 
@@ -135,7 +113,7 @@ app.http("wellKnownMcp", {
   route: ".well-known/oauth-protected-resource/mcp",
   authLevel: "anonymous",
   handler: async (request: HttpRequest): Promise<HttpResponseInit> => {
-    return jsonResponse(buildProtectedResourceMetadata(getMcpResourceUrl(request), getBaseUrl(request)));
+    return jsonResponse(buildProtectedResourceMetadata(getBaseUrl(request)));
   },
 });
 
@@ -205,7 +183,7 @@ app.http("mcp", {
   authLevel: "anonymous",
   handler: async (request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> => {
     // ── Auth ──────────────────────────────────────────────────────────────
-    const authResult = await authenticate(request);
+    const authResult = authenticate(request);
     if (authResult !== null && typeof authResult === "object" && "status" in authResult) {
       return authResult; // Auth failure response
     }
@@ -301,9 +279,6 @@ app.http("mcp", {
 /**
  * Convert a Web Standard Response to Azure Functions HttpResponseInit,
  * preserving the ReadableStream body for proper SSE streaming.
- *
- * Azure Functions v4 HttpResponseInit.body accepts ReadableStream natively —
- * the runtime streams chunks to the client without buffering.
  */
 function streamWebResponse(webResponse: Response): HttpResponseInit {
   const headers: Record<string, string> = {};

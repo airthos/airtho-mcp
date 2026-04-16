@@ -1,53 +1,68 @@
 /**
  * OAuth 2.1 Proxy — bridges Claude's OAuth client to Entra ID.
  *
- * Claude (web and desktop) expects the MCP server to be its own authorization
- * server with DCR support. Entra ID doesn't support DCR. This proxy accepts
- * Claude's OAuth requests and proxies them to Entra ID using our pre-registered
- * app credentials.
+ * Simplified (softeria-style) approach: return raw Entra tokens directly
+ * to Claude. No proxy JWT, no session storage. Stateless after /token completes.
  *
  * Flow:
- *   Claude → POST /register        → we return our client_id
- *   Claude → GET  /authorize        → we redirect to Entra ID login
- *   User   → signs in at Entra      → Entra redirects to GET /callback
- *   Server → GET  /callback         → we redirect back to Claude with auth code
- *   Claude → POST /token            → we exchange code with Entra, return token
+ *   1. Claude → POST /register       → proxy returns a client_id
+ *   2. Claude → GET  /authorize       → proxy stores dual PKCE, redirects to Entra
+ *   3. User   → signs in at Entra     → Entra redirects to GET /callback
+ *   4. Server → GET  /callback        → exchanges Entra code immediately, stores tokens
+ *                                        briefly, redirects to Claude with proxy code
+ *   5. Claude → POST /token           → proxy validates PKCE, returns raw Entra tokens
  *
- * The token Claude receives is an opaque session ID (UUID), not the raw
- * Entra JWT. The real Entra token is cached server-side and used for OBO
- * Graph calls when Claude sends the session ID as a Bearer token.
+ * Token validation on subsequent requests: the raw Entra access_token is passed
+ * directly as Bearer — tool handlers use it for OBO Graph calls.
  */
 
 import { HttpRequest, HttpResponseInit } from "@azure/functions";
-import { randomUUID, createHash } from "node:crypto";
-import { createSession } from "./sessions.js";
+import { randomUUID, createHash, randomBytes } from "node:crypto";
 
-// ── In-memory stores (per worker instance) ────────────────────────────────────
+/**
+ * Safely extract the user principal name from a JWT payload for logging only.
+ * Never used for authorization decisions — just to correlate App Insights traces.
+ */
+function peekUpn(token: string): string {
+  try {
+    const payload = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString()) as Record<string, unknown>;
+    return (payload.preferred_username ?? payload.upn ?? payload.unique_name ?? "unknown") as string;
+  } catch {
+    return "unknown";
+  }
+}
 
-/** Maps our proxy auth codes to Entra auth codes + metadata. */
-const pendingCodes = new Map<string, {
-  entraCode: string;
-  redirectUri: string;
-  resource: string;
-  codeVerifier?: string;
+// ── In-memory stores ───────────────────────────────────────────────────────────
+
+/**
+ * Pending authorization flows: proxyState → flow metadata.
+ * Lives between /authorize and /callback (seconds, during Entra login).
+ */
+const pendingAuthorizations = new Map<string, {
+  clientRedirectUri: string;
+  /** Claude's PKCE challenge (validated at /token) */
+  codeChallenge?: string;
+  codeChallengeMethod?: string;
+  /** Claude's original state (round-tripped back) */
+  clientState?: string;
+  scope?: string;
+  /** Proxy's PKCE verifier (sent to Entra at callback exchange) */
+  proxyCodeVerifier: string;
   expiresAt: number;
 }>();
 
-/** Maps state → { clientRedirectUri, codeChallenge, codeChallengeMethod } for the authorize flow. */
-const pendingAuthorizations = new Map<string, {
-  clientRedirectUri: string;
-  resource: string;
+/**
+ * Completed auth flows: proxyCode → Entra tokens + PKCE challenge.
+ * Lives between /callback and /token (milliseconds — Claude calls immediately).
+ */
+const completedExchanges = new Map<string, {
+  entraAccessToken: string;
+  entraRefreshToken?: string;
+  entraExpiresIn: number;
+  entraScope: string;
   codeChallenge?: string;
   codeChallengeMethod?: string;
-  clientState?: string;
-  scope?: string;
-}>();
-
-/** DCR client registrations — maps client_id → client metadata. */
-const registeredClients = new Map<string, {
-  client_id: string;
-  redirect_uris: string[];
-  client_name?: string;
+  expiresAt: number;
 }>();
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -65,8 +80,24 @@ function entraTokenUrl(): string {
   return `https://login.microsoftonline.com/${process.env.TENANT_ID!}/oauth2/v2.0/token`;
 }
 
-function canonicalResourceUrl(request: HttpRequest): string {
-  return `${getBaseUrl(request).replace(/\/$/, "")}/mcp`;
+function generateCodeVerifier(): string {
+  return randomBytes(32).toString("base64url");
+}
+
+function computeS256Challenge(verifier: string): string {
+  return createHash("sha256").update(verifier).digest("base64url");
+}
+
+function validatePkce(codeVerifier: string, codeChallenge: string, method = "S256"): boolean {
+  if (method === "S256") return computeS256Challenge(codeVerifier) === codeChallenge;
+  if (method === "plain") return codeVerifier === codeChallenge;
+  return false;
+}
+
+function cleanupExpired(): void {
+  const now = Date.now();
+  for (const [k, v] of pendingAuthorizations) { if (v.expiresAt < now) pendingAuthorizations.delete(k); }
+  for (const [k, v] of completedExchanges) { if (v.expiresAt < now) completedExchanges.delete(k); }
 }
 
 // ── RFC 8414 — Authorization Server Metadata ──────────────────────────────────
@@ -83,10 +114,15 @@ export function handleAuthServerMetadata(request: HttpRequest): HttpResponseInit
       registration_endpoint: `${baseUrl}/register`,
       response_types_supported: ["code"],
       grant_types_supported: ["authorization_code", "refresh_token"],
-      code_challenge_methods_supported: ["S256", "plain"],
-      token_endpoint_auth_methods_supported: ["client_secret_post", "none"],
-      resource_parameter_supported: true,
-      scopes_supported: ["openid", "profile", "email", "offline_access"],
+      code_challenge_methods_supported: ["S256"],
+      token_endpoint_auth_methods_supported: ["none", "client_secret_post", "client_secret_basic"],
+      scopes_supported: [
+        `api://${process.env.CLIENT_ID!}/mcp.access`,
+        "openid",
+        "profile",
+        "email",
+        "offline_access",
+      ],
     }),
   };
 }
@@ -105,73 +141,55 @@ export async function handleRegister(request: HttpRequest): Promise<HttpResponse
     };
   }
 
-  // Log what Claude sends for debugging
   console.log("[OAuth Proxy] DCR register request:", JSON.stringify(body));
 
-  // Accept whatever Claude sends, return our pre-registered Entra client_id
-  const clientId = process.env.CLIENT_ID!;
   const redirectUris = (body.redirect_uris as string[]) ?? [];
   const clientName = (body.client_name as string) ?? "Claude";
-
-  const registration = {
-    client_id: clientId,
-    redirect_uris: redirectUris,
-    client_name: clientName,
-  };
-
-  registeredClients.set(clientId, registration);
-
-  // Mirror back what Claude requested. Include a client_secret since Claude
-  // registered with token_endpoint_auth_method: "client_secret_post".
-  const requestedAuthMethod = (body.token_endpoint_auth_method as string) ?? "client_secret_post";
-  const clientSecret = process.env.CLIENT_SECRET!;
+  const requestedAuthMethod = (body.token_endpoint_auth_method as string) ?? "none";
 
   return {
     status: 201,
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      client_id: clientId,
-      client_secret: clientSecret,
+      client_id: randomUUID(),
       client_name: clientName,
       redirect_uris: redirectUris,
       token_endpoint_auth_method: requestedAuthMethod,
       grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],
-      scope: (body.scope as string) ?? `api://${clientId}/mcp.access offline_access`,
+      scope: (body.scope as string) ?? `api://${process.env.CLIENT_ID!}/mcp.access offline_access`,
     }),
   };
 }
 
-// ── Authorization Endpoint ────────────────────────────────────────────────────
+// ── Authorization Endpoint ─────────────────────────────────────────────────────
 
 export function handleAuthorize(request: HttpRequest): HttpResponseInit {
   console.log("[OAuth Proxy] Authorize request:", request.url);
+  cleanupExpired();
+
   const url = new URL(request.url);
   const clientRedirectUri = url.searchParams.get("redirect_uri") ?? "";
-  const resource = url.searchParams.get("resource") ?? canonicalResourceUrl(request);
   const codeChallenge = url.searchParams.get("code_challenge") ?? undefined;
   const codeChallengeMethod = url.searchParams.get("code_challenge_method") ?? undefined;
   const clientState = url.searchParams.get("state") ?? undefined;
   const scope = url.searchParams.get("scope") ?? undefined;
 
-  // Generate a state token to track this authorization flow
+  // Generate proxy's own PKCE pair for the Entra leg (dual PKCE)
+  const proxyCodeVerifier = generateCodeVerifier();
+  const proxyCodeChallenge = computeS256Challenge(proxyCodeVerifier);
+
   const proxyState = randomUUID();
   pendingAuthorizations.set(proxyState, {
     clientRedirectUri,
-    resource,
     codeChallenge,
     codeChallengeMethod,
     clientState,
     scope,
+    proxyCodeVerifier,
+    expiresAt: Date.now() + 600_000, // 10 minutes
   });
 
-  // Clean up expired entries (older than 10 minutes)
-  const now = Date.now();
-  for (const [key, val] of pendingCodes) {
-    if (val.expiresAt < now) pendingCodes.delete(key);
-  }
-
-  // Build Entra ID authorization URL
   const baseUrl = getBaseUrl(request);
   const entraParams = new URLSearchParams({
     client_id: process.env.CLIENT_ID!,
@@ -180,15 +198,9 @@ export function handleAuthorize(request: HttpRequest): HttpResponseInit {
     scope: `api://${process.env.CLIENT_ID!}/mcp.access offline_access openid profile`,
     state: proxyState,
     response_mode: "query",
+    code_challenge: proxyCodeChallenge,
+    code_challenge_method: "S256",
   });
-
-  // Forward PKCE to Entra if provided
-  if (codeChallenge) {
-    entraParams.set("code_challenge", codeChallenge);
-    if (codeChallengeMethod) {
-      entraParams.set("code_challenge_method", codeChallengeMethod);
-    }
-  }
 
   return {
     status: 302,
@@ -196,15 +208,17 @@ export function handleAuthorize(request: HttpRequest): HttpResponseInit {
   };
 }
 
-// ── Callback (from Entra ID after user login) ─────────────────────────────────
+// ── Callback (from Entra ID after user login) ──────────────────────────────────
 
-export function handleCallback(request: HttpRequest): HttpResponseInit {
-  console.log("[OAuth Proxy] Callback request:", request.url);
+export async function handleCallback(request: HttpRequest): Promise<HttpResponseInit> {
   const url = new URL(request.url);
   const entraCode = url.searchParams.get("code");
   const proxyState = url.searchParams.get("state");
   const error = url.searchParams.get("error");
   const errorDescription = url.searchParams.get("error_description");
+
+  // Log safe fields only — never log the Entra auth code
+  console.log(`[OAuth Proxy] Callback: state=${proxyState?.slice(0, 8) ?? "none"}… hasCode=${!!entraCode} error=${error ?? "none"}`);
 
   if (!proxyState || !pendingAuthorizations.has(proxyState)) {
     return {
@@ -218,7 +232,6 @@ export function handleCallback(request: HttpRequest): HttpResponseInit {
   pendingAuthorizations.delete(proxyState);
 
   if (error || !entraCode) {
-    // Forward error back to Claude's redirect URI
     const redirectUrl = new URL(pending.clientRedirectUri);
     redirectUrl.searchParams.set("error", error ?? "server_error");
     if (errorDescription) redirectUrl.searchParams.set("error_description", errorDescription);
@@ -226,33 +239,73 @@ export function handleCallback(request: HttpRequest): HttpResponseInit {
     return { status: 302, headers: { location: redirectUrl.toString() } };
   }
 
-  // Generate a proxy auth code that maps to the Entra code
-  const proxyCode = randomUUID();
-  pendingCodes.set(proxyCode, {
-    entraCode,
-    redirectUri: pending.clientRedirectUri,
-    resource: pending.resource,
-    expiresAt: Date.now() + 600_000, // 10 minutes
+  // Exchange Entra code immediately (not deferred to /token)
+  const baseUrl = getBaseUrl(request);
+  const entraParams = new URLSearchParams({
+    client_id: process.env.CLIENT_ID!,
+    client_secret: process.env.CLIENT_SECRET!,
+    grant_type: "authorization_code",
+    code: entraCode,
+    redirect_uri: `${baseUrl}/callback`,
+    code_verifier: pending.proxyCodeVerifier,
   });
 
-  // Redirect back to Claude with our proxy code
-  const redirectUrl = new URL(pending.clientRedirectUri);
-  redirectUrl.searchParams.set("code", proxyCode);
-  if (pending.clientState) {
-    redirectUrl.searchParams.set("state", pending.clientState);
+  const entraResponse = await fetch(entraTokenUrl(), {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: entraParams.toString(),
+  });
+
+  const entraResult = await entraResponse.json() as Record<string, unknown>;
+  console.log(`[OAuth Proxy] Entra token exchange: status=${entraResponse.status}`);
+
+  if (!entraResponse.ok) {
+    // Log only the error code/description — never the full response (may contain hints)
+    console.log(`[OAuth Proxy] Entra token error: ${entraResult.error} — ${entraResult.error_description}`);
+    const redirectUrl = new URL(pending.clientRedirectUri);
+    redirectUrl.searchParams.set("error", "server_error");
+    redirectUrl.searchParams.set("error_description",
+      `Entra exchange failed: ${entraResult.error_description ?? entraResult.error ?? "unknown"}`);
+    if (pending.clientState) redirectUrl.searchParams.set("state", pending.clientState);
+    return { status: 302, headers: { location: redirectUrl.toString() } };
   }
 
+  const accessToken = entraResult.access_token as string;
+  const refreshToken = entraResult.refresh_token as string | undefined;
+  const expiresIn = (entraResult.expires_in as number) ?? 3600;
+  const entraScope = (entraResult.scope as string) ?? `api://${process.env.CLIENT_ID!}/mcp.access`;
+
+  const upn = peekUpn(accessToken);
+  console.log(`[OAuth Proxy] Entra exchange succeeded: user=${upn} expires_in=${expiresIn} has_refresh=${!!refreshToken}`);
+
+  // Store briefly for /token to consume (Claude calls /token within seconds)
+  const proxyCode = randomUUID();
+  completedExchanges.set(proxyCode, {
+    entraAccessToken: accessToken,
+    entraRefreshToken: refreshToken,
+    entraExpiresIn: expiresIn,
+    entraScope,
+    codeChallenge: pending.codeChallenge,
+    codeChallengeMethod: pending.codeChallengeMethod,
+    expiresAt: Date.now() + 300_000, // 5 minutes
+  });
+
+  // Redirect back to Claude with the proxy code
+  const redirectUrl = new URL(pending.clientRedirectUri);
+  redirectUrl.searchParams.set("code", proxyCode);
+  if (pending.clientState) redirectUrl.searchParams.set("state", pending.clientState);
   return { status: 302, headers: { location: redirectUrl.toString() } };
 }
 
-// ── Token Endpoint ────────────────────────────────────────────────────────────
+// ── Token Endpoint ─────────────────────────────────────────────────────────────
 
 export async function handleToken(request: HttpRequest): Promise<HttpResponseInit> {
   let params: URLSearchParams;
   try {
     const text = await request.text();
-    console.log("[OAuth Proxy] Token request body:", text);
     params = new URLSearchParams(text);
+    // Log only non-secret fields — never log code, code_verifier, or refresh_token values
+    console.log(`[OAuth Proxy] Token request: grant_type=${params.get("grant_type")} has_code=${params.has("code")} has_verifier=${params.has("code_verifier")} has_refresh=${params.has("refresh_token")}`);
   } catch {
     return {
       status: 400,
@@ -262,14 +315,13 @@ export async function handleToken(request: HttpRequest): Promise<HttpResponseIni
   }
 
   const grantType = params.get("grant_type");
-  const baseUrl = getBaseUrl(request);
 
+  // ── authorization_code grant ───────────────────────────────────────────────
   if (grantType === "authorization_code") {
     const proxyCode = params.get("code");
-    const resource = params.get("resource");
     const codeVerifier = params.get("code_verifier") ?? undefined;
 
-    if (!proxyCode || !pendingCodes.has(proxyCode)) {
+    if (!proxyCode || !completedExchanges.has(proxyCode)) {
       return {
         status: 400,
         headers: { "content-type": "application/json" },
@@ -277,10 +329,10 @@ export async function handleToken(request: HttpRequest): Promise<HttpResponseIni
       };
     }
 
-    const pending = pendingCodes.get(proxyCode)!;
-    pendingCodes.delete(proxyCode);
+    const exchange = completedExchanges.get(proxyCode)!;
+    completedExchanges.delete(proxyCode); // consume-once
 
-    if (pending.expiresAt < Date.now()) {
+    if (exchange.expiresAt < Date.now()) {
       return {
         status: 400,
         headers: { "content-type": "application/json" },
@@ -288,76 +340,49 @@ export async function handleToken(request: HttpRequest): Promise<HttpResponseIni
       };
     }
 
-    if (resource && resource !== pending.resource) {
-      return {
-        status: 400,
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ error: "invalid_target", error_description: "Requested resource does not match authorization" }),
-      };
+    // Validate Claude's PKCE
+    if (exchange.codeChallenge && codeVerifier) {
+      if (!validatePkce(codeVerifier, exchange.codeChallenge, exchange.codeChallengeMethod)) {
+        return {
+          status: 400,
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ error: "invalid_grant", error_description: "PKCE verification failed" }),
+        };
+      }
     }
 
-    // Exchange the Entra auth code for tokens
-    const entraParams = new URLSearchParams({
-      client_id: process.env.CLIENT_ID!,
-      client_secret: process.env.CLIENT_SECRET!,
-      grant_type: "authorization_code",
-      code: pending.entraCode,
-      redirect_uri: `${baseUrl}/callback`,
-    });
-    if (codeVerifier) {
-      entraParams.set("code_verifier", codeVerifier);
+    console.log(`[OAuth Proxy] Token issued: user=${peekUpn(exchange.entraAccessToken)} expires_in=${exchange.entraExpiresIn}`);
+
+    const tokenResponse: Record<string, unknown> = {
+      access_token: exchange.entraAccessToken,
+      token_type: "Bearer",
+      expires_in: exchange.entraExpiresIn,
+      scope: exchange.entraScope,
+    };
+
+    if (exchange.entraRefreshToken) {
+      tokenResponse.refresh_token = exchange.entraRefreshToken;
     }
-
-    const entraResponse = await fetch(entraTokenUrl(), {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: entraParams.toString(),
-    });
-
-    const entraResult = await entraResponse.json() as Record<string, unknown>;
-    console.log("[OAuth Proxy] Entra token response:", entraResponse.status, JSON.stringify(entraResult));
-
-    if (!entraResponse.ok) {
-      console.log("[OAuth Proxy] Entra token error:", JSON.stringify(entraResult));
-      return {
-        status: entraResponse.status,
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(entraResult),
-      };
-    }
-
-    // Create an opaque session token — Claude gets a UUID, not the Entra JWT.
-    // The real Entra token is cached server-side for OBO Graph calls.
-    const sessionId = createSession({
-      access_token: entraResult.access_token as string,
-      refresh_token: entraResult.refresh_token as string | undefined,
-      expires_in: entraResult.expires_in as number,
-    });
-
-    console.log("[OAuth Proxy] Created session, returning opaque token");
 
     return {
       status: 200,
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        access_token: sessionId,
-        token_type: "Bearer",
-        expires_in: entraResult.expires_in,
-        scope: entraResult.scope,
-      }),
+      body: JSON.stringify(tokenResponse),
     };
   }
 
+  // ── refresh_token grant ────────────────────────────────────────────────────
   if (grantType === "refresh_token") {
     const refreshToken = params.get("refresh_token");
     if (!refreshToken) {
       return {
         status: 400,
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ error: "invalid_request", error_description: "Missing refresh_token" }),
+        body: JSON.stringify({ error: "invalid_grant", error_description: "refresh_token required" }),
       };
     }
 
+    // Forward directly to Entra — stateless, no server-side storage needed
     const entraParams = new URLSearchParams({
       client_id: process.env.CLIENT_ID!,
       client_secret: process.env.CLIENT_SECRET!,
@@ -374,10 +399,33 @@ export async function handleToken(request: HttpRequest): Promise<HttpResponseIni
 
     const entraResult = await entraResponse.json() as Record<string, unknown>;
 
+    if (!entraResponse.ok) {
+      console.log(`[OAuth Proxy] Entra refresh error: ${entraResult.error} — ${entraResult.error_description}`);
+      return {
+        status: 400,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ error: "invalid_grant", error_description: "Token refresh failed" }),
+      };
+    }
+
+    const newAccessToken = entraResult.access_token as string;
+    console.log(`[OAuth Proxy] Token refreshed: user=${peekUpn(newAccessToken)} expires_in=${entraResult.expires_in}`);
+
+    const tokenResponse: Record<string, unknown> = {
+      access_token: newAccessToken,
+      token_type: "Bearer",
+      expires_in: entraResult.expires_in,
+      scope: entraResult.scope,
+    };
+
+    if (entraResult.refresh_token) {
+      tokenResponse.refresh_token = entraResult.refresh_token;
+    }
+
     return {
-      status: entraResponse.status,
+      status: 200,
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(entraResult),
+      body: JSON.stringify(tokenResponse),
     };
   }
 
