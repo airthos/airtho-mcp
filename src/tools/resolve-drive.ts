@@ -4,7 +4,10 @@ import type { GraphDrive, McpError } from "../types.js";
 /** Cached drive list per cold-start (drives don't change often). */
 let _driveCache: { id: string; name: string; nameLower: string }[] | null = null;
 
-async function loadDrives(siteId: string, userToken?: string): Promise<{ id: string; name: string; nameLower: string }[]> {
+async function loadDrives(
+  siteId: string,
+  userToken?: string,
+): Promise<{ id: string; name: string; nameLower: string }[]> {
   if (_driveCache) return _driveCache;
 
   const client = getGraphClient(userToken);
@@ -26,8 +29,12 @@ export interface ResolvedDrive {
  * Resolve a human-readable drive name to a Graph drive ID.
  * Case-insensitive match. Returns an McpError if not found.
  */
-export async function resolveDrive(driveName: string, userToken?: string): Promise<ResolvedDrive | McpError> {
-  const siteId = process.env.DEFAULT_SITE_ID;
+export async function resolveDrive(
+  driveName: string,
+  userToken?: string,
+  siteIdOverride?: string,
+): Promise<ResolvedDrive | McpError> {
+  const siteId = siteIdOverride ?? process.env.DEFAULT_SITE_ID;
   if (!siteId) {
     return { error: "missing_site_id", message: "DEFAULT_SITE_ID is not configured on the server" };
   }

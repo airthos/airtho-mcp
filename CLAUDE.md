@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-An MCP (Model Context Protocol) server that exposes Airtho's Microsoft SharePoint/OneDrive document libraries to Claude via the Microsoft Graph API. Uses the MCP SDK (`@modelcontextprotocol/sdk`) with Azure Functions v4 HTTP triggers. Per-user OAuth 2.1 authentication via Entra ID — each Claude user authenticates individually, and Graph API calls run under their identity via the On-Behalf-Of (OBO) flow. All tools are read-only.
+An MCP (Model Context Protocol) server that exposes two authenticated SharePoint file-transfer tools via the Microsoft Graph API. Uses the MCP SDK (`@modelcontextprotocol/sdk`) with Azure Functions v4 HTTP triggers. Per-user OAuth 2.1 authentication via Entra ID means each user authenticates individually, and Graph API calls run under their identity through the On-Behalf-Of (OBO) flow.
 
 ## Commands
 
@@ -33,7 +33,7 @@ npm run clean
 - Azure Functions Core Tools v4: `npm install -g azure-functions-core-tools@4`
 - `local.settings.json` filled with real credentials (copy from `local.settings.json.example`)
 - Azurite for local storage emulation: `npm install -g azurite && azurite --silent --location /tmp/azurite &` (or replace `UseDevelopmentStorage=true` with a real Azure Storage connection string)
-- Set `REQUIRE_AUTH=false` to skip OAuth for local dev (tools fall back to service account)
+- Add `http://localhost:7071/callback` as a Web redirect URI in the Entra app registration for local OAuth testing
 
 ## Architecture
 
@@ -45,14 +45,12 @@ Entry point: `src/index.ts` registers HTTP routes (`/mcp`, `/authorize`, `/token
 
 ### Tool Registration
 
-All 13 MCP tools are registered in `src/mcp-server.ts` via the MCP SDK's `McpServer.tool()` with Zod input schemas. Tool implementations live in `src/tools/*.ts`.
+Two MCP tools are registered in `src/mcp-server.ts` via the MCP SDK's `McpServer.tool()` with Zod input schemas. Tool implementations live in `src/tools/*.ts`.
 
-| Category | Tools |
+| Tool | Purpose |
 |---|---|
-| Job tools | `airtho_search_jobs`, `airtho_get_job`, `airtho_find_in_job`, `airtho_read_job_file`, `airtho_get_recent_jobs` |
-| Drive tools | `airtho_browse`, `airtho_search`, `airtho_read` |
-| Vendor tools | `airtho_list_vendors` |
-| List tools | `airtho_list_lists`, `airtho_get_list_items`, `airtho_search_list`, `airtho_get_list_item` |
+| `airtho_download_sharepoint_file` | Download a SharePoint file as base64 bytes |
+| `airtho_upload_sharepoint_file` | Upload base64 bytes to a SharePoint document library directory |
 
 Tools use `airtho_` prefix to avoid conflicts with Microsoft's M365 MCP connector.
 
@@ -67,17 +65,16 @@ Claude requires the MCP server to act as its own OAuth authorization server (Ent
 | `/register` | DCR — accepts Claude's registration, returns a proxy client_id (not the real Entra ID) |
 | `/authorize` | Stores Claude's PKCE, generates proxy PKCE, redirects to Entra ID login |
 | `/callback` | Exchanges Entra code immediately (not deferred to /token), stores tokens + claims, redirects to Claude with opaque proxy code |
-| `/token` | Validates Claude's PKCE, returns self-signed JWT access_token + opaque refresh_token |
+| `/token` | Validates Claude's PKCE and returns Entra tokens |
 
-**Key design decisions (matching Profility reference implementation):**
+**Key design decisions:**
 - **Dual PKCE**: Claude's code_challenge/verifier are validated by the proxy; a separate PKCE pair is used for the Entra leg
 - **Exchange in /callback**: Entra code is consumed immediately in the callback, eliminating timing/cold-start risks
-- **Self-signed JWT access tokens**: Claude receives a JWT with user claims (not an opaque UUID or raw Entra JWT) issued by `src/auth/jwt-builder.ts`
-- **Refresh tokens**: An opaque refresh_token is returned, mapped server-side to Entra's refresh_token
-- **Session persistence**: Entra tokens are cached in Azure Table Storage (table: `McpSessions`) + in-memory hot cache, surviving Azure Functions cold starts
-- **Proxy client_id**: DCR returns a SHA-256 hash, never the real Entra client_id or client_secret
+- **Raw Entra access tokens**: Claude receives the Entra access token returned by `/token`
+- **Refresh tokens**: Entra refresh tokens are returned when issued by Microsoft
+- **Proxy client_id**: DCR returns a generated client ID, never the real Entra client ID or client secret
 
-Tool handlers read the resolved Entra token from `AsyncLocalStorage` (`src/auth/token-store.ts`) and use it for OBO Graph calls.
+Tool handlers read the request token from `AsyncLocalStorage` (`src/auth/token-store.ts`) and use it for OBO Graph calls.
 
 ### Graph Client (`src/graph/client.ts`)
 
@@ -100,7 +97,7 @@ OBO logic lives in `src/auth/obo.ts`. All tool and resolver files accept an opti
 | `TENANT_ID` | YES | Entra ID tenant ID (GUID) |
 | `CLIENT_ID` | YES | App registration client ID (GUID) |
 | `CLIENT_SECRET` | YES | App registration client secret |
-| `DEFAULT_SITE_ID` | NO | Fallback SharePoint site ID — format: `airtho.sharepoint.com,<guid>,<guid>` |
+| `DEFAULT_SITE_ID` | NO | Fallback SharePoint site ID. Format: `airtho.sharepoint.com,<guid>,<guid>` |
 | `REQUIRE_AUTH` | NO | Set to `"false"` to disable OAuth (local dev). Default: `"true"` |
 | `MCP_RESOURCE_URI` | NO | Public URL of the server. Auto-detected from request headers if not set |
 
@@ -110,10 +107,10 @@ Local dev: vars go in `local.settings.json` under `Values`. Azure reads them fro
 
 ### Entra ID App Registration Requirements
 
-- **Application permissions**: `Sites.Read.All` (for service account fallback)
-- **Delegated permissions**: `Sites.Read.All`, `Files.Read.All`, `User.Read`
+- **Delegated Microsoft Graph permissions**: `Sites.ReadWrite.All`, `User.Read`
 - **Expose an API**: scope `api://<CLIENT_ID>/mcp.access` (admins and users can consent)
 - **Redirect URI**: `https://<your-azure-app>.azurewebsites.net/callback` (Web platform)
+- **Local redirect URI**: `http://localhost:7071/callback` (Web platform)
 - **Allow public client flows**: No (only needed for device code testing)
 
 ## Adding a New Tool
@@ -126,8 +123,7 @@ Local dev: vars go in `local.settings.json` under `Values`. Azure reads them fro
 
 ## Important Notes
 
-- **MCP is text-only** — files are returned as extracted strings, never binary
-- **Content truncated at 50,000 chars** (`CHARACTER_LIMIT` in `src/constants.ts`) — check `truncated` flag; surface `download_url` to the user if needed
-- **No PDF text extraction** — `.docx` is supported via native ZIP parsing; PDFs are not (liteparse exploration stashed)
-- **`local.settings.json` and `.env` must never be committed** — they contain real credentials
-- **OAuth proxy state is in-memory** — pending auth codes and DCR registrations are lost on worker restart; this is fine because the OAuth flow completes in seconds
+- **MCP responses are JSON text**. Binary files are represented as base64 strings.
+- **Simple Graph uploads are capped at 250 MB**. Larger files need upload sessions.
+- **`local.settings.json` and `.env` must never be committed** because they contain real credentials.
+- **OAuth proxy state is in-memory**. Pending auth codes and DCR registrations are lost on worker restart, which is acceptable because the OAuth flow completes quickly.
