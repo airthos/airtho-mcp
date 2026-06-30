@@ -16,7 +16,7 @@ Local development endpoint:
 http://localhost:7071/mcp
 ```
 
-Do not use a static API key. This MCP server uses OAuth. The agent builder should discover and complete OAuth through the server metadata.
+Do not use a static API key. This MCP server uses OAuth. The agent builder can inspect tool definitions before OAuth, but file upload and download calls require OAuth.
 
 OAuth metadata endpoints:
 
@@ -25,7 +25,7 @@ https://<function-app>.azurewebsites.net/.well-known/oauth-protected-resource
 https://<function-app>.azurewebsites.net/.well-known/oauth-authorization-server
 ```
 
-After OAuth succeeds, call the MCP endpoint with:
+After OAuth succeeds, call tool methods on the MCP endpoint with:
 
 ```text
 Authorization: Bearer <access token>
@@ -62,7 +62,7 @@ http://localhost:7071/callback
 
 ## Available Tools
 
-The server exposes exactly two tools after authentication.
+The server exposes exactly two tools. Tool definitions may be listed before authentication for setup and clerical review. Tool calls are denied until the user authenticates.
 
 ```text
 airtho_download_sharepoint_file
@@ -228,7 +228,7 @@ Airtho MCP local upload test
 
 ## Notes For Agents
 
-- Always authenticate before calling tools.
+- Tool discovery can happen before OAuth. Always authenticate before calling upload or download.
 - Always provide `site_url` when the target site is known.
 - Use `drive_name: "Documents"` for the default SharePoint document library unless the user specifies a different library.
 - Preserve binary files by treating content as bytes, not text, before base64 encoding or after base64 decoding.

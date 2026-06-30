@@ -66,7 +66,7 @@ function jsonResponse(body: unknown, status = 200, headers?: Record<string, stri
  * Tool handlers use it for OBO Graph calls — if invalid, Graph returns 401.
  *
  *   1. No token + REQUIRE_AUTH  → 401 with RFC 9728 metadata pointer
- *   2. No token + !REQUIRE_AUTH → allow through (local dev)
+ *   2. No token + !REQUIRE_AUTH → allow through
  *   3. Token present            → pass through as Entra token
  */
 function authenticate(request: HttpRequest): string | null | HttpResponseInit {
@@ -94,7 +94,14 @@ function authenticate(request: HttpRequest): string | null | HttpResponseInit {
     return raw;
   }
 
-  return null; // No token, auth not required (local dev)
+  return null; // No token, auth not required for this request
+}
+
+function isPublicMcpRequest(parsedBody: unknown): boolean {
+  const body = parsedBody as { method?: unknown } | null;
+  return body?.method === "initialize"
+    || body?.method === "notifications/initialized"
+    || body?.method === "tools/list";
 }
 
 // ── RFC 9728 — Protected Resource Metadata ────────────────────────────────────
@@ -182,13 +189,6 @@ app.http("mcp", {
   route: MCP_ROUTE,
   authLevel: "anonymous",
   handler: async (request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> => {
-    // ── Auth ──────────────────────────────────────────────────────────────
-    const authResult = authenticate(request);
-    if (authResult !== null && typeof authResult === "object" && "status" in authResult) {
-      return authResult; // Auth failure response
-    }
-    const userToken = typeof authResult === "string" ? authResult : undefined;
-
     // ── Read body once (stream can only be consumed once) ────────────────
     const rawBody = (request.method === "POST" || request.method === "PUT")
       ? await request.text().catch(() => "")
@@ -216,6 +216,13 @@ app.http("mcp", {
           400,
         );
       }
+
+      // Let clients inspect schemas before auth. Tool execution still denies unauthenticated calls.
+      const authResult = isPublicMcpRequest(parsedBody) ? null : authenticate(request);
+      if (authResult !== null && typeof authResult === "object" && "status" in authResult) {
+        return authResult; // Auth failure response
+      }
+      const userToken = typeof authResult === "string" ? authResult : undefined;
 
       let transport: WebStandardStreamableHTTPServerTransport;
 
@@ -251,6 +258,13 @@ app.http("mcp", {
 
       return streamWebResponse(webResponse);
     }
+
+    // ── Auth for stream/session methods ──────────────────────────────────
+    const authResult = authenticate(request);
+    if (authResult !== null && typeof authResult === "object" && "status" in authResult) {
+      return authResult; // Auth failure response
+    }
+    const userToken = typeof authResult === "string" ? authResult : undefined;
 
     if (request.method === "GET") {
       if (!sessionId || !mcpSessions.has(sessionId)) {

@@ -54,6 +54,8 @@ Two MCP tools are registered in `src/mcp-server.ts` via the MCP SDK's `McpServer
 
 Tools use `airtho_` prefix to avoid conflicts with Microsoft's M365 MCP connector.
 
+Unauthenticated clients may call `initialize`, `notifications/initialized`, and `tools/list` so agent builders can inspect tool definitions before OAuth. File upload and download calls must still authenticate; handlers return `auth_required` without a per-request user token.
+
 ### OAuth 2.1 Authentication
 
 Claude requires the MCP server to act as its own OAuth authorization server (Entra ID doesn't support Dynamic Client Registration). The server implements an OAuth proxy in `src/auth/proxy.ts`:
